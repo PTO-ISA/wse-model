@@ -129,9 +129,7 @@ def _workflow_job_names() -> set[str]:
             contexts.add(template)
             return
         for value in matrix_values.get(reference.group(1), []):
-            contexts.add(
-                template[: reference.start()] + value + template[reference.end() :]
-            )
+            contexts.add(template[: reference.start()] + value + template[reference.end() :])
 
     for line in text.splitlines():
         if line.startswith("jobs:"):
