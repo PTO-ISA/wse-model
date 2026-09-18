@@ -38,6 +38,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Calendar §3.10 evaluated over a declared symbol and section manifest, so the
   invariant is checkable without a compiler and a toolchain that cannot produce
   the manifest fails rather than passing by omission.
+- Compiler-side deployment package (`wse_model.compiler.package`): the five
+  artifacts of whitepaper §13.3, the artifact version agreement, the per-call-site
+  immediates, and the same-`opcode` concurrency rule of Calendar §2.3.1/§2.7.1 as
+  a check rather than a re-derivation. `wse-model check package` reports 26
+  distinct checks.
+- A public-API contract test that pins every namespace's `__all__`.
 - `wse_model.analysis.dcache`: the D-cache residency and cold-miss account of
   Calendar §3.8, including the 4x entry-to-line amplification, the
   `Batcher.mem` versus DDR refill split, and the `C-9` layout comparison.
