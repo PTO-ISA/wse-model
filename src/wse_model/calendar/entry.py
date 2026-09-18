@@ -42,7 +42,7 @@ __all__ = [
     "ENTRY_SIZE_BYTES",
     "ROUTE_BITS_NODE_CAPACITY",
     "RouteEntryFlags",
-    "RoutePairRegs",
+    "CalendarRouteRegs",
     "CalendarRouteEntry",
     "entry_layout_size_bytes",
 ]
@@ -81,7 +81,7 @@ class RouteEntryFlags(IntFlag):
 
 
 @dataclass(frozen=True)
-class RoutePairRegs:
+class CalendarRouteRegs:
     """The two 64 bit registers a route entry is loaded into.
 
     The field boundaries mirror Calendar §1.7 exactly; they are not
@@ -202,7 +202,7 @@ class CalendarRouteEntry:
         )
 
     @classmethod
-    def from_regs(cls, regs: RoutePairRegs, node_count: int) -> CalendarRouteEntry:
+    def from_regs(cls, regs: CalendarRouteRegs, node_count: int) -> CalendarRouteEntry:
         """Decode from the register pair, ignoring ``rbHi`` above bit 15+48.
 
         Hardware is required to ignore the high 48 bit of ``rbHi`` when sending
@@ -218,11 +218,11 @@ class CalendarRouteEntry:
             declared_land_count=regs.land_count,
         )
 
-    def to_regs(self) -> RoutePairRegs:
+    def to_regs(self) -> CalendarRouteRegs:
         payload = self.to_bytes()
         lo = int.from_bytes(payload[0:8], "little")
         hi = int.from_bytes(payload[8:16], "little")
-        return RoutePairRegs(rb_lo=lo, rb_hi=hi)
+        return CalendarRouteRegs(rb_lo=lo, rb_hi=hi)
 
     def describe(self) -> dict[str, object]:
         return {

@@ -20,8 +20,8 @@ from wse_model.calendar.entry import (
     ENTRY_SIZE_BYTES,
     ROUTE_BITS_NODE_CAPACITY,
     CalendarRouteEntry,
+    CalendarRouteRegs,
     RouteEntryFlags,
-    RoutePairRegs,
     entry_layout_size_bytes,
 )
 from wse_model.calendar.epoch import (
@@ -107,7 +107,7 @@ __all__ = [
     "RouteBits",
     "RouteEntryFlags",
     "RouteKey",
-    "RoutePairRegs",
+    "CalendarRouteRegs",
     "Segment",
     "SegmentId",
     "Severity",

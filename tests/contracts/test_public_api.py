@@ -77,7 +77,7 @@ EXPECTED_EXPORTS: dict[str, frozenset[str]] = {
             "RouteBits",
             "RouteEntryFlags",
             "RouteKey",
-            "RoutePairRegs",
+            "CalendarRouteRegs",
             "Segment",
             "SegmentId",
             "Severity",

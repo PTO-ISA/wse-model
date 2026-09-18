@@ -140,3 +140,24 @@ def test_the_documented_minimum_batches_are_unchanged() -> None:
     assert round(min_batch_to_escape_memory_bound("fp16")) == 6
     assert round(min_batch_to_escape_memory_bound("fp8")) == 23
     assert round(min_batch_to_escape_memory_bound("fp4")) == 46
+
+
+def test_red_op_codes_are_frozen_as_a_deliberate_choice() -> None:
+    """Calendar §2.4 lists the operators but fixes neither the codes nor their order.
+
+    The model assigns them in listing order, which is a choice rather than a
+    transcription, so it is pinned here: a change must be deliberate and cite
+    open item C-10, which also gates every reduction path that could use them.
+    """
+    from wse_model.calendar.collective import ALIGNMENT_SEMAPHORE_WIDTH_BITS, RedOp
+
+    assert [(op.name, int(op)) for op in RedOp] == [
+        ("NONE", 0),
+        ("SUM", 1),
+        ("MAX", 2),
+        ("MIN", 3),
+        ("PROD", 4),
+    ]
+    assert not RedOp.NONE.is_active
+    # HW-7: the existing 4 bit semaphore cannot count a 32-core phase-B rendezvous.
+    assert ALIGNMENT_SEMAPHORE_WIDTH_BITS == 4

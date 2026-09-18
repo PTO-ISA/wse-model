@@ -286,8 +286,10 @@ for _item in (
         _CALENDAR,
         "hardware+runtime",
         Resolution.ASSUMED,
-        "The model assumes the SPR path (zero loads) and models the argument path "
-        "as the documented fallback.",
+        "The model assumes the SPR path and represents the argument fallback only "
+        "as a load-count and value-class difference "
+        "(LaunchConstraints.block_id_cost); it does not simulate the extra load or "
+        "its second-level dependency.",
         decision="0001",
     ),
     OpenItem(
@@ -315,7 +317,11 @@ for _item in (
         _CALENDAR,
         "noc",
         Resolution.OPEN,
-        "Gates opening the Reduce / AllReduce / ReduceScatter branches.",
+        "Gates opening the Reduce / AllReduce / ReduceScatter branches. It also "
+        "covers the redOp numeric codes: Calendar §2.4 lists None/Sum/Max/Min/Prod "
+        "but fixes neither the codes nor their order, so the model assigns them in "
+        "listing order and pins that choice with a golden test. Every use is inside "
+        "a reduction path, which C-10 already blocks.",
     ),
     OpenItem(
         "C-11",

@@ -171,3 +171,53 @@ def test_retire_requires_completion() -> None:
     assert account.complete
     ingress.retire(account)
     assert ingress.outstanding == ()
+
+
+def test_contract_3_only_committed_payload_is_counted() -> None:
+    """Accounting follows the commit, which is what makes MTE4 completion acquire."""
+    from dataclasses import replace
+
+    account = _account(exp_val=64)
+    in_flight = replace(_segment(seq=1), committed=False)
+    assert account.deliver(in_flight) is DeliveryOutcome.UNCOMMITTED
+    assert account.counted_bytes == 0
+    assert not account.complete
+    # An uncommitted delivery must not enter the de-duplication set, or the commit
+    # would be reported as a duplicate and the bytes would be lost.
+    assert in_flight.identity not in account.seen
+
+    assert account.deliver(in_flight.committed_copy()) is DeliveryOutcome.COUNTED
+    assert account.counted_bytes == 64
+    assert account.complete
+    # And now a repeat is a duplicate.
+    assert account.deliver(in_flight.committed_copy()) is DeliveryOutcome.DUPLICATE
+    assert account.counted_bytes == 64
+
+
+def test_contract_3_commit_through_the_ingress_ledger() -> None:
+    from dataclasses import replace
+
+    ingress = CoreIngress(0)
+    ingress.post(_account(exp_val=64))
+    pending = replace(_segment(seq=9), committed=False)
+    assert ingress.deliver(pending) is DeliveryOutcome.UNCOMMITTED
+    assert ingress.outstanding[0].counted_bytes == 0
+    assert ingress.commit(pending) is DeliveryOutcome.COUNTED
+    assert ingress.outstanding[0].counted_bytes == 64
+    assert ingress.outstanding[0].complete
+
+
+def test_a_segment_defaults_to_committed() -> None:
+    """Fixtures and the closure treat a delivered segment as already committed."""
+    assert _segment(seq=3).committed is True
+
+
+def test_an_uncommitted_segment_still_faults_out_of_range() -> None:
+    """Contract 3 defers accounting; it does not defer the range check."""
+    from dataclasses import replace
+
+    account = _account(exp_val=32, capacity=64)
+    bad = replace(_segment(seq=4, address=0x1000 + 32, nbytes=64), committed=False)
+    with pytest.raises(ReceiveContractError) as excinfo:
+        account.deliver(bad)
+    assert excinfo.value.contract == 2

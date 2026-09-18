@@ -116,9 +116,7 @@ def test_the_version_check_faults_before_kickstart(compiled) -> None:
 def test_every_row_group_is_a_schedulable_unit(compiled) -> None:
     """The scheduler must not split a group that is syncing across waves."""
     example, package = compiled
-    groups = tuple(
-        frozenset(group) for group in sorted(set(example.phase_b_groups.values()))
-    )
+    groups = tuple(frozenset(group) for group in sorted(set(example.phase_b_groups.values())))
     assert len(groups) == 4, "the FFN's phase B is four row groups"
 
     scheduler = Scheduler(node_count=package.node_count, groups=groups)
@@ -155,8 +153,6 @@ def test_block_id_indexes_the_emitted_table(compiled) -> None:
     for node in range(package.node_count):
         entry = package.table.entry(0, node)
         assert entry.route_bits.node_count == package.node_count
-        LaunchConstraints.require_block_id(
-            block_id=node, node_count=package.node_count
-        )
+        LaunchConstraints.require_block_id(block_id=node, node_count=package.node_count)
     with pytest.raises(CalendarError):
         LaunchConstraints.require_block_id(block_id=40, node_count=package.node_count)

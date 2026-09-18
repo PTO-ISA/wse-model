@@ -63,6 +63,7 @@ nav:
       - AICORE: architecture/aicore.md
       - Batcher and UB bus: architecture/batcher-ub.md
       - Runtime and loading: architecture/runtime.md
+      - Compiler: architecture/compiler.md
   - Requirements:
       - Index: requirements/index.md
       - Calendar closure: requirements/calendar-closure.md

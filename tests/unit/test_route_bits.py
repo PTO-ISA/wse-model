@@ -8,8 +8,8 @@ from wse_model.calendar.entry import (
     ENTRY_SIZE_BYTES,
     ROUTE_BITS_NODE_CAPACITY,
     CalendarRouteEntry,
+    CalendarRouteRegs,
     RouteEntryFlags,
-    RoutePairRegs,
     entry_layout_size_bytes,
 )
 from wse_model.calendar.route_bits import BitPair, RouteBits
@@ -151,7 +151,7 @@ def test_entry_register_pair_field_boundaries() -> None:
         flags=RouteEntryFlags.IS_MEMBER | RouteEntryFlags.SELF_LAND,
     )
     regs = entry.to_regs()
-    assert isinstance(regs, RoutePairRegs)
+    assert isinstance(regs, CalendarRouteRegs)
     assert regs.land_count == entry.land_count == 2
     assert regs.flags == RouteEntryFlags.IS_MEMBER | RouteEntryFlags.SELF_LAND
     assert regs.expected_rx_bytes == 0xDEADBEEF

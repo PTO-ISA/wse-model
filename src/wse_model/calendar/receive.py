@@ -71,6 +71,17 @@ class Segment:
     nbytes: int
     #: Set for the source's own contribution, which never counts (contract 1).
     self_sourced: bool = False
+    #: Contract 3: accounting happens only once the payload is committed and
+    #: readable by this core's successors, which is what makes MTE4 completion an
+    #: acquire. A write that has reached the arena but not committed is not
+    #: countable yet and must not be dropped either.
+    committed: bool = True
+
+    def committed_copy(self) -> Segment:
+        """The same segment, marked committed."""
+        from dataclasses import replace
+
+        return replace(self, committed=True)
 
     def __post_init__(self) -> None:
         if self.nbytes < 0:
@@ -99,6 +110,10 @@ class DeliveryOutcome(str, Enum):
     DEFERRED = "deferred"
     """Buffered because no matching receive command has been posted yet
     (contract 4)."""
+
+    UNCOMMITTED = "uncommitted"
+    """Arrived but not yet committed, so not countable (contract 3). The delivery
+    must be re-presented after the commit, not silently dropped."""
 
 
 @dataclass
@@ -184,6 +199,10 @@ class ReceiveAccount:
                 f"[{segment.address}, {segment.end_address}) which leaves the "
                 f"receive range [{self.dst}, {self.dst + self.capacity})",
             )
+        if not segment.committed:
+            # Contract 3: measure only committed payload. The segment is not
+            # counted and not de-duplicated yet, so its commit can count it once.
+            return DeliveryOutcome.UNCOMMITTED
         if segment.self_sourced:
             return DeliveryOutcome.SELF_SOURCED
         if segment.identity in self.seen:
@@ -278,6 +297,15 @@ class CoreIngress:
 
     def deliver_all(self, segments: Iterable[Segment]) -> list[DeliveryOutcome]:
         return [self.deliver(segment) for segment in segments]
+
+    def commit(self, segment: Segment) -> DeliveryOutcome:
+        """Re-present a segment once its write has committed (contract 3).
+
+        Before this the delivery returns :attr:`DeliveryOutcome.UNCOMMITTED` and
+        counts nothing; afterwards it counts exactly once, because an uncommitted
+        delivery never entered the de-duplication set.
+        """
+        return self.deliver(segment.committed_copy())
 
     def describe(self) -> dict[str, object]:
         return {

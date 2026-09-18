@@ -190,3 +190,81 @@ def test_run_ffn_single_phase(capsys) -> None:
     assert code == 0
     assert len(payload["phases"]) == 1
     assert payload["phases"][0]["phase"] == "phase_c_col_allgather"
+
+
+# -- the ACIR layer surface ------------------------------------------------
+
+
+def test_acir_info_describes_the_layer_without_a_toolchain(capsys) -> None:
+    """Reporting on the layer must not require the frontend it reports on."""
+    code, payload = _json(capsys, "--json", "acir", "info")
+    assert code == 0
+    assert payload["package"] == "wse_model.acir"
+    assert "ACPy" in payload["frontend"]
+    assert [rule["name"] for rule in payload["rules"]] == [
+        "load_route_entry",
+        "apply_forward",
+        "admit_send",
+        "epoch_policy",
+        "recv_wait",
+    ]
+    # The gap list is read from the layer's README, so it cannot drift from it.
+    assert payload["gap_count"] == len(payload["documented_gaps"]) > 0
+    assert any("single file" in gap for gap in payload["documented_gaps"])
+
+
+def test_acir_info_lists_the_build_path(capsys) -> None:
+    code, payload = _json(capsys, "--json", "acir", "info")
+    assert code == 0
+    commands = [entry["command"] for entry in payload["build_commands"]]
+    assert any("acir-tools" in command for command in commands)
+    assert any("bootstrap" in command for command in commands)
+
+
+def test_acir_lower_emits_acir_for_a_fixed_node(capsys) -> None:
+    """``lower_acir()`` is pure Python, so this runs wherever the frontend is."""
+    pytest.importorskip(
+        "agentic_circuit",
+        reason="the agentic_circuit frontend is not installed (not published on PyPI)",
+    )
+    code, payload = _json(capsys, "--json", "acir", "lower", "--node", "0")
+    assert code == 0
+    assert payload["bindings"] == {
+        "node_index": 0,
+        "node_count": 40,
+        "epoch_tag_bits": 8,
+    }
+    assert payload["acir_lines"] > 100
+    assert payload["acir_bytes"] > 1000
+    assert 'ac.model_kind = "queue_graph"' in payload["text"]
+    assert "ac.struct @CalEvent" in payload["text"]
+
+
+def test_acir_lower_fails_closed_on_an_out_of_range_node(capsys) -> None:
+    pytest.importorskip(
+        "agentic_circuit",
+        reason="the agentic_circuit frontend is not installed (not published on PyPI)",
+    )
+    code, captured = _run(capsys, "acir", "lower", "--node", "40")
+    assert code == 2
+    assert "node_index" in captured.err
+
+
+def test_acir_lower_reports_a_missing_frontend_helpfully(capsys, monkeypatch) -> None:
+    """Without the frontend the command must name the fix, not raise a traceback."""
+    import builtins
+    import os
+
+    if os.environ.get("ACIR_OPT"):
+        pytest.skip("the frontend is present in this environment")
+    real_import = builtins.__import__
+
+    def blocked(name, *args, **kwargs):
+        if name == "agentic_circuit" or name.startswith("agentic_circuit."):
+            raise ImportError("blocked for the test")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", blocked)
+    code, captured = _run(capsys, "acir", "lower", "--node", "0")
+    assert code == 2
+    assert "not published on PyPI" in captured.err or "bootstrap" in captured.err
