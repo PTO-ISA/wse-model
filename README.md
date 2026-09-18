@@ -94,27 +94,41 @@ make bootstrap PYCIRCUIT_ROOT=../pyCircuit
 ```bash
 # Inspect the canonical topology and its derived route-bit golden vectors
 wse-model topology show
+wse-model calendar encode --key golden
 
-# Encode one row-wise AllGather key and validate it
+# Encode one FFN logical identity for a specific core
 wse-model calendar encode --key row-allgather --source 0
 
-# Validate every key in a compiled route table
+# Validate the compiled route table (omit --table for the built-in FFN example)
+wse-model calendar validate
 wse-model calendar validate --table build/ffn.calendar.json
 
-# Run the FFN two-phase AllGather scenario end to end
-wse-model run examples/ffn_allgather.py
+# Emit the aligned .rodata segment, under either layout
+wse-model calendar emit --layout node-major
+
+# Run the FFN two-phase AllGather closure end to end
+wse-model run ffn-allgather
+
+# Closed-form analysis and the unresolved design items
+wse-model report roofline
+wse-model report overhead
+wse-model open-items --status open
 ```
 
-See [`docs/index.md`](docs/index.md) for the full documentation map and
-[`examples/`](examples/) for runnable scenarios.
+Every command accepts `--json` for scripting. See
+[`docs/reference/cli.md`](docs/reference/cli.md) for the full reference,
+[`examples/`](examples/) for runnable scenarios, and
+[`docs/index.md`](docs/index.md) for the documentation map.
 
 ## Status
 
-Pre-alpha. The semantic core and the Calendar/NoC closure are the current
-focus; AICORE, Batcher, and the runtime model follow. The model tracks the
-v0.1 whitepaper set dated 2026-09-17 and reports every unresolved item from
+Pre-alpha. The pure-Python semantic core and the Calendar/NoC closure are
+implemented and tested; the ACIR model layer, the AICORE model, the Batcher/UB
+model, and the compiler/runtime model follow. The model tracks the v0.1
+whitepaper set dated 2026-09-17 and reports every unresolved item from
 [Appendix A](docs/design/wse-system-architecture-whitepaper.md) rather than
-assuming a value; see [`docs/roadmap.md`](docs/roadmap.md).
+assuming a value; see [`docs/roadmap.md`](docs/roadmap.md) and
+[`docs/reference/open-items.md`](docs/reference/open-items.md).
 
 ## Contributing
 

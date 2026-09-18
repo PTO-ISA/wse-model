@@ -195,3 +195,40 @@ def test_cli_json_top_level_keys_are_stable(capsys) -> None:
         "useful_payload_fraction",
     ):
         assert field in payload["phases"][0], field
+
+
+# -- machine-readable schema ----------------------------------------------
+
+
+def test_emitted_table_validates_against_the_published_schema() -> None:
+    """`schemas/calendar-route-table.schema.json` is part of the contract."""
+    jsonschema = pytest.importorskip("jsonschema")
+    from pathlib import Path
+
+    schema_path = Path(__file__).resolve().parents[2] / "schemas" / "calendar-route-table.schema.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    validator = jsonschema.Draft202012Validator(schema)
+    errors = sorted(validator.iter_errors(ffn_example().table.to_dict()), key=str)
+    assert not errors, "\n".join(error.message for error in errors)
+
+
+def test_schema_rejects_a_table_with_a_wrong_schema_name() -> None:
+    jsonschema = pytest.importorskip("jsonschema")
+    from pathlib import Path
+
+    schema_path = Path(__file__).resolve().parents[2] / "schemas" / "calendar-route-table.schema.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    payload = ffn_example().table.to_dict()
+    payload["schema"] = "wse-model/calendar-route-table/2"
+    assert list(jsonschema.Draft202012Validator(schema).iter_errors(payload))
+
+
+def test_schema_rejects_an_entry_with_a_malformed_bitmap() -> None:
+    jsonschema = pytest.importorskip("jsonschema")
+    from pathlib import Path
+
+    schema_path = Path(__file__).resolve().parents[2] / "schemas" / "calendar-route-table.schema.json"
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    payload = ffn_example().table.to_dict()
+    payload["keys"][0]["entries"][0]["route_bits"] = "not-hex"
+    assert list(jsonschema.Draft202012Validator(schema).iter_errors(payload))
