@@ -40,6 +40,14 @@ def arithmetic_intensity_decode(batch: int) -> float:
 
     Whitepaper §1: each weight byte is multiplied once, and a multiply-add is two
     FLOPs, so intensity scales with the batch dimension.
+
+    This is the document's *first-order* convention: it counts two FLOPs per
+    weight **element**, which treats a "weight byte" as one element regardless of
+    the element's real width. It is what produces the published minimum batches,
+    and it assumes the Cube fills its ``M x K x N`` block. The tile-accurate
+    counterpart, which charges for a partly idle ``M`` dimension, lives in
+    :class:`wse_model.core.cube.MatmulTiming`; decision 0006 records why both are
+    reported.
     """
     if batch < 0:
         raise WseModelError(f"batch must be non-negative, got {batch}")
@@ -54,7 +62,14 @@ def balance_point(name: str, *, bandwidth_bytes_per_sec: float = LOCAL_DRAM_BYTE
 def min_batch_to_escape_memory_bound(
     name: str, *, bandwidth_bytes_per_sec: float = LOCAL_DRAM_BYTES_PER_SEC
 ) -> float:
-    """Balance point divided by 2: the batch above which decode is compute-bound."""
+    """Balance point divided by 2: the batch above which decode is compute-bound.
+
+    Valid under the whitepaper's first-order convention (see
+    :func:`arithmetic_intensity_decode`). A tile-accurate model can return a
+    different verdict at small batch, because at ``batch = 1`` a 16-row Cube block
+    runs 1/16 filled; compare with
+    :attr:`wse_model.core.cube.MatmulTiming.is_memory_bound`.
+    """
     return balance_point(name, bandwidth_bytes_per_sec=bandwidth_bytes_per_sec) / 2.0
 
 
