@@ -51,6 +51,7 @@ coverage.xml
 Thumbs.db
 
 # Build and generated outputs
+site/
 .pycircuit_out/
 .wse_model_out/
 build/

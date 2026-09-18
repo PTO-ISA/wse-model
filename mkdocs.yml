@@ -35,6 +35,22 @@ markdown_extensions:
 plugins:
   - search
 
+# The pages link to repository files outside docs/ (source modules, the Makefile,
+# tests, AGENTS.md) with repository-relative paths. Those links are correct on
+# GitHub, which is the canonical reading surface, but MkDocs resolves them as
+# documentation pages and would fail a --strict build. Permit them explicitly
+# rather than by dropping --strict, so a genuinely missing *page* is still an
+# error.
+validation:
+  nav:
+    omitted_files: warn
+    not_found: warn
+    absolute_links: warn
+  links:
+    not_found: ignore
+    absolute_links: ignore
+    unrecognized_links: ignore
+
 nav:
   - Home: index.md
   - Roadmap: roadmap.md
@@ -52,10 +68,12 @@ nav:
       - Calendar closure: requirements/calendar-closure.md
   - Decisions:
       - Index: decisions/index.md
-      - "0001 Record decisions as ADRs": decisions/0001-record-decisions-as-adrs.md
+      - "0001 Adopt the Calendar baseline readings": decisions/0001-adopt-calendar-baseline-defaults.md
       - "0002 Two-layer model with a pure-Python semantic core": decisions/0002-two-layer-model.md
       - "0003 Keep unresolved design items explicit": decisions/0003-keep-open-items-explicit.md
       - "0004 Golden vectors are frozen contracts": decisions/0004-golden-vectors-are-contract.md
+      - "0005 Static route-table layout": decisions/0005-static-table-layout.md
+      - "0006 Two roofline verdicts": decisions/0006-two-roofline-verdicts.md
   - Development:
       - Getting started: development/getting-started.md
       - Testing and gates: development/testing-and-gates.md
@@ -64,6 +82,7 @@ nav:
       - CLI: reference/cli.md
       - Descriptors and schemas: reference/descriptors.md
       - Open items: reference/open-items.md
+      - Glossary: reference/glossary.md
 
 extra:
   generator: false
