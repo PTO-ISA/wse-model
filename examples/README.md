@@ -9,6 +9,8 @@ python examples/ffn_allgather.py
 python examples/validate_route_table.py
 python examples/header_cost.py
 python examples/check_kernel_object.py
+python examples/roofline_two_verdicts.py
+python examples/dispatch_and_refill.py
 ```
 
 | Example | Shows |
@@ -17,6 +19,8 @@ python examples/check_kernel_object.py
 | `validate_route_table.py` | Running the Calendar §2.7.2 check set over a table loaded from JSON, including a deliberately corrupted one |
 | `header_cost.py` | The flit header price at 40 versus 48 nodes, and why open item `Q1` matters |
 | `check_kernel_object.py` | The F1/F2/F3 compiled-product prohibitions of Calendar §3.10, each shown passing and failing |
+| `roofline_two_verdicts.py` | Why the model reports both a first-order and a tile-accurate roofline verdict, and where they disagree (decision 0006) |
+| `dispatch_and_refill.py` | The four Batcher responsibilities, the three load-time chains, the shared-`Batcher.mem` refill split, a load→kickstart→launch sequence, and the scheduling constraints |
 
 `examples/data/ffn-kernel-object.json` is the conforming kernel-object manifest
 that `check_kernel_object.py` starts from; it is also used by
