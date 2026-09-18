@@ -24,6 +24,7 @@ section of the design sources. Nothing is invented:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from wse_model.calendar.collective import Collective, RedOp
 from wse_model.calendar.entry import CalendarRouteEntry, RouteEntryFlags
@@ -301,6 +302,55 @@ def ffn_example(
             f"publishes {expected_c}"
         )
     return example
+
+
+def clean_kernel_object(
+    *,
+    key_count: int = 2,
+    node_count: int = 40,
+    path: str = "<fixture>",
+    symbols: tuple[Any, ...] | None = None,
+    sections: tuple[Any, ...] | None = None,
+) -> Any:
+    """A declared compiled product that satisfies F1, F2, and F3.
+
+    Used by the tests and by ``wse-model check object --example`` as the
+    known-good baseline that the negative cases are built from.
+    """
+    from wse_model.calendar.entry import ENTRY_SIZE_BYTES
+    from wse_model.compiler.selfcheck import (
+        ROUTE_TABLE_SYMBOL,
+        ObjectFile,
+        Section,
+        SectionInfo,
+        Symbol,
+        SymbolKind,
+    )
+
+    default_symbols = (
+        Symbol("ffn_fused", SymbolKind.FUNCTION, Section.TEXT, size=512),
+        Symbol(
+            ROUTE_TABLE_SYMBOL,
+            SymbolKind.READ_ONLY_OBJECT,
+            Section.RODATA,
+            size=key_count * node_count * ENTRY_SIZE_BYTES,
+            addr_align=64,
+            is_global=False,
+        ),
+    )
+    default_sections = (
+        SectionInfo(Section.TEXT, addr_align=4, size=512),
+        SectionInfo(
+            Section.RODATA,
+            addr_align=64,
+            size=key_count * node_count * ENTRY_SIZE_BYTES,
+        ),
+    )
+    return ObjectFile(
+        symbols=default_symbols if symbols is None else tuple(symbols),
+        sections=default_sections if sections is None else tuple(sections),
+        path=path,
+    )
 
 
 def red_op_for(collective: Collective) -> RedOp:

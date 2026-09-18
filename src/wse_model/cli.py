@@ -24,6 +24,7 @@ from wse_model.analysis import (
 )
 from wse_model.calendar.table import CalendarRouteTable, TableLayout
 from wse_model.collective import run_allgather
+from wse_model.compiler import check_compiled_product, load_object_file
 from wse_model.errors import WseModelError
 from wse_model.fixtures import (
     FFN_PHASE_B_ROW_BYTES,
@@ -148,6 +149,35 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     report_sub.add_parser("overhead", parents=[common], help="flit header overhead per topology")
     report_sub.add_parser("aicore", parents=[common], help="AICORE specifications")
+
+    # check ---------------------------------------------------------------
+    check = subparsers.add_parser("check", help="run the compiler product self-checks (F1/F2/F3)")
+    check_sub = check.add_subparsers(dest="check_command", required=True)
+    check_object = check_sub.add_parser(
+        "object", parents=[common], help="check a declared kernel object manifest"
+    )
+    check_object.add_argument(
+        "--object",
+        type=Path,
+        help="kernel object manifest JSON; omit with --example for the built-in baseline",
+    )
+    check_object.add_argument(
+        "--example",
+        action="store_true",
+        help="check the built-in clean manifest instead of a file",
+    )
+    check_object.add_argument(
+        "--key-count",
+        type=int,
+        default=2,
+        help="keyCount the compiled product is expected to contain",
+    )
+    check_object.add_argument(
+        "--node-count",
+        type=int,
+        default=40,
+        help="nodeCount the compiled product is expected to contain",
+    )
 
     # open items ----------------------------------------------------------
     items = subparsers.add_parser(
@@ -355,6 +385,30 @@ def _cmd_report_aicore(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_check_object(args: argparse.Namespace) -> int:
+    from wse_model.fixtures import clean_kernel_object
+
+    if args.object is None and not args.example:
+        raise WseModelError(
+            "provide --object PATH with a kernel object manifest, or --example to "
+            "check the built-in clean baseline"
+        )
+    if args.object is not None:
+        object_file = load_object_file(args.object)
+    else:
+        object_file = clean_kernel_object(key_count=args.key_count, node_count=args.node_count)
+    report = check_compiled_product(
+        object_file, key_count=args.key_count, node_count=args.node_count
+    )
+    payload = {
+        "object": object_file.describe(),
+        "expected": {"key_count": args.key_count, "node_count": args.node_count},
+        **report.describe(),
+    }
+    _emit(payload, as_json=args.json, text=report.format())
+    return 0 if report.ok else 1
+
+
 def _cmd_open_items(args: argparse.Namespace) -> int:
     wanted = None if args.status == "all" else Resolution(args.status)
     items = [
@@ -395,6 +449,7 @@ _HANDLERS = {
     "report.bandwidth": _cmd_report_bandwidth,
     "report.overhead": _cmd_report_overhead,
     "report.aicore": _cmd_report_aicore,
+    "check.object": _cmd_check_object,
     "open-items": _cmd_open_items,
 }
 
@@ -411,6 +466,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         key = f"report.{args.report_command}"
     elif args.command == "calendar":
         key = f"calendar.{args.calendar_command}"
+    elif args.command == "check":
+        key = f"check.{args.check_command}"
     else:
         key = args.command
 
