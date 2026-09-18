@@ -43,6 +43,15 @@ contract: ## Run interface and schema contract tests
 integration: ## Run end-to-end model scenarios
 	$(PYTEST) tests/integration
 
+.PHONY: acir
+acir: ## Run the ACIR model-layer tests (requires the native ACIR tools)
+	@if [ -z "$$ACIR_OPT" ]; then \
+		echo "ACIR_OPT is not set. Build the tools first:"; \
+		echo "  bash tools/build-acir-tools.sh $${PYCIRCUIT_ROOT:-../pyCircuit}"; \
+		exit 1; \
+	fi
+	$(PYTEST) tests/acir -m acir
+
 .PHONY: coverage
 coverage: ## Run tests with a coverage report
 	$(PYTEST) --cov=wse_model --cov-report=term-missing --cov-report=xml

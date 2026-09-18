@@ -40,15 +40,13 @@ jobs:
             **/*.md
             !docs/design/**
             !CHANGELOG.md
-      - name: repository hygiene
-        run: |
-          git diff --check
-          test -f LICENSE
-          test -f AGENTS.md
-          test -f NOTICE
+      - name: repository standards
+        run: python tools/check_repo_standards.py
+      - name: whitespace hygiene
+        run: git diff --check
 
   test:
-    name: test (py${{ matrix.python-version }})
+    name: test (${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -102,6 +100,36 @@ jobs:
         run: python -m pip install -e ".[dev,docs]"
       - name: Build documentation
         run: python -m mkdocs build --strict
+
+  acir:
+    name: acir (opt-in)
+    # The agentic_circuit layer needs the pyCircuit native toolchain, which is a
+    # long LLVM-linked build. Set the repository variable WSE_MODEL_ACIR_CI=true
+    # to enable this job; it is deliberately not a required check.
+    if: vars.WSE_MODEL_ACIR_CI == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out pyCircuit
+        uses: actions/checkout@v4
+        with:
+          repository: PTO-ISA/pyCircuit
+          path: .pycircuit
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install agentic-circuit frontend
+        run: |
+          python -m pip install -e .pycircuit/python/semantic-core
+          python -m pip install -e .pycircuit/python/agentic-circuit
+          python -m pip install -e ".[dev]"
+      - name: Build the native ACIR tools
+        run: bash tools/build-acir-tools.sh .pycircuit
+      - name: ACIR layer tests
+        env:
+          ACIR_OPT: ${{ github.workspace }}/.pycircuit/.pycircuit_out/toolchain/build/bin/acir-opt
+          ACIR_QUEUE_CXXGEN: ${{ github.workspace }}/.pycircuit/.pycircuit_out/toolchain/build/bin/acir-queue-cxxgen
+        run: python -m pytest tests/acir -q
 
   design-fidelity:
     name: design fidelity
