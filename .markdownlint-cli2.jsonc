@@ -11,6 +11,9 @@
   },
   "ignores": [
     "docs/design/**/*.md",
-    "CHANGELOG.md"
+    "CHANGELOG.md",
+    ".venv/**",
+    "site/**",
+    "build/**"
   ]
 }
