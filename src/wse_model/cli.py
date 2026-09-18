@@ -16,6 +16,7 @@ from typing import Any
 from wse_model import __version__
 from wse_model.analysis import (
     BANDWIDTHS,
+    PRECISIONS,
     AicoreSpec,
     dcache_budget,
     flit_header_cost,
@@ -26,6 +27,7 @@ from wse_model.analysis import (
 from wse_model.calendar.table import CalendarRouteTable, TableLayout
 from wse_model.collective import run_allgather
 from wse_model.compiler import check_compiled_product, load_object_file
+from wse_model.core import MatmulShape, matmul_timing
 from wse_model.errors import WseModelError
 from wse_model.fixtures import (
     FFN_PHASE_B_ROW_BYTES,
@@ -35,6 +37,15 @@ from wse_model.fixtures import (
     golden_route_bits,
     group_allgather_bitmap,
 )
+from wse_model.host import (
+    BatcherMem,
+    LaunchConstraints,
+    RuntimeTier,
+    UbBus,
+    dispatch_chains,
+    dispatch_paths,
+)
+from wse_model.host.ub_bus import local_dram_over_fabric_ratio
 from wse_model.noc import CalRegImage, CalRegSlot, Noc
 from wse_model.open_items import OPEN_ITEMS, Resolution
 from wse_model.topology import CALENDAR_BASELINE, PROFILES, topology_profile
@@ -152,6 +163,27 @@ def _build_parser() -> argparse.ArgumentParser:
     report_sub.add_parser("aicore", parents=[common], help="AICORE specifications")
     report_sub.add_parser(
         "dcache", parents=[common], help="route-table D-cache residency and cold-miss cost"
+    )
+    matmul = report_sub.add_parser(
+        "matmul", parents=[common], help="tile-accurate Cube and memory timing"
+    )
+    matmul.add_argument("--m", type=int, default=1, help="M dimension (batch)")
+    matmul.add_argument("--k", type=int, default=4096, help="K dimension (reduction)")
+    matmul.add_argument("--n", type=int, default=4096, help="N dimension (output)")
+    matmul.add_argument(
+        "--precision", default="fp16", choices=sorted(PRECISIONS), help="weight precision"
+    )
+    matmul.add_argument(
+        "--fetched-weight-bytes",
+        type=int,
+        default=None,
+        help="actual fetched weight bytes when the layout is padded",
+    )
+    report_sub.add_parser(
+        "host", parents=[common], help="UB bus, Batcher responsibilities, and cache refills"
+    )
+    report_sub.add_parser(
+        "runtime", parents=[common], help="load/launch tiers, dispatch chains, and constraints"
     )
 
     # check ---------------------------------------------------------------
@@ -428,6 +460,53 @@ def _cmd_check_object(args: argparse.Namespace) -> int:
     return 0 if report.ok else 1
 
 
+def _cmd_report_matmul(args: argparse.Namespace) -> int:
+    timing = matmul_timing(
+        MatmulShape(args.m, args.k, args.n),
+        precision_name=args.precision,
+        fetched_weight_bytes=args.fetched_weight_bytes,
+    )
+    _emit(timing.describe(), as_json=args.json)
+    return 0
+
+
+def _cmd_report_host(args: argparse.Namespace) -> int:
+    bus = UbBus()
+    mem = BatcherMem()
+    _emit(
+        {
+            "ub_bus": bus.describe(),
+            "local_dram_over_fabric_ratio": round(local_dram_over_fabric_ratio(), 4),
+            "dispatch_paths": [path.describe() for path in dispatch_paths()],
+            "batcher_mem": mem.describe(),
+            "ffn_data_cache_refill": mem.data_refill(
+                distinct_lines=20, requesters_per_line=4
+            ).describe(),
+        },
+        as_json=args.json,
+    )
+    return 0
+
+
+def _cmd_report_runtime(args: argparse.Namespace) -> int:
+    _emit(
+        {
+            "tiers": [tier.value for tier in RuntimeTier],
+            "chains": {chain.value: payload for chain, payload in dispatch_chains().items()},
+            "block_id_paths": {
+                "spr": LaunchConstraints.block_id_cost(from_spr=True),
+                "argument": LaunchConstraints.block_id_cost(from_spr=False),
+            },
+            "steady_state_dispatch": (
+                "activations plus a descriptor; no Calendar data, no per-core "
+                "expansion, no run-time descriptors (whitepaper §12.2)"
+            ),
+        },
+        as_json=args.json,
+    )
+    return 0
+
+
 def _cmd_open_items(args: argparse.Namespace) -> int:
     wanted = None if args.status == "all" else Resolution(args.status)
     items = [
@@ -469,6 +548,9 @@ _HANDLERS = {
     "report.overhead": _cmd_report_overhead,
     "report.aicore": _cmd_report_aicore,
     "report.dcache": _cmd_report_dcache,
+    "report.matmul": _cmd_report_matmul,
+    "report.host": _cmd_report_host,
+    "report.runtime": _cmd_report_runtime,
     "check.object": _cmd_check_object,
     "open-items": _cmd_open_items,
 }

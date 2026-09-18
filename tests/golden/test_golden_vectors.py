@@ -106,3 +106,37 @@ def test_topology_shapes_are_unchanged() -> None:
     assert CALENDAR_BASELINE.topology.node_count == 40
     assert (WHITEPAPER_HARDWARE.topology.rows, WHITEPAPER_HARDWARE.topology.cols) == (6, 8)
     assert WHITEPAPER_HARDWARE.topology.node_count == 48
+
+
+def test_the_two_roofline_verdicts_are_frozen() -> None:
+    """The tile-accurate model and the whitepaper's balance point differ at batch 1.
+
+    The whitepaper's first-order analysis (2 x batch FLOP per weight element)
+    predicts memory-bound down to batch 6 at FP16. A tile-accurate Cube charges
+    for a 1/16-filled M dimension, which makes compute the longer leg at FP16
+    batch 1 while FP8 and FP4 remain memory-bound. Both verdicts are pinned so
+    that neither can quietly replace the other; see decision 0006.
+    """
+    from wse_model.core import MatmulShape, matmul_timing
+
+    fp16 = matmul_timing(MatmulShape(1, 4096, 4096), precision_name="fp16")
+    assert fp16.first_order_intensity == 2.0
+    assert fp16.first_order_is_memory_bound
+    assert not fp16.is_memory_bound
+    assert fp16.m_utilization == 1 / 16
+    assert fp16.effective_macs_per_cycle == 256.0
+
+    for name in ("fp8", "fp4"):
+        timing = matmul_timing(MatmulShape(1, 4096, 4096), precision_name=name)
+        assert timing.is_memory_bound, name
+        assert timing.first_order_is_memory_bound, name
+        assert timing.effective_macs_per_cycle > fp16.effective_macs_per_cycle
+
+
+def test_the_documented_minimum_batches_are_unchanged() -> None:
+    """Whichever verdict is used, the published 6 / 23 / 46 must not move."""
+    from wse_model.analysis import min_batch_to_escape_memory_bound
+
+    assert round(min_batch_to_escape_memory_bound("fp16")) == 6
+    assert round(min_batch_to_escape_memory_bound("fp8")) == 23
+    assert round(min_batch_to_escape_memory_bound("fp4")) == 46
