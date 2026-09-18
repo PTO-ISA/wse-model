@@ -169,3 +169,45 @@ def test_negative_sizes_are_rejected() -> None:
         Symbol("x", SymbolKind.OTHER, Section.OTHER, size=-1)
     with pytest.raises(CalendarError):
         SectionInfo(Section.RODATA, addr_align=0)
+
+
+# -- repository integrity --------------------------------------------------
+
+
+def _repo_root():
+    from pathlib import Path
+
+    return Path(__file__).resolve().parents[2]
+
+
+def test_the_example_manifest_validates_against_the_published_schema() -> None:
+    """examples/data and schemas/ must not drift apart."""
+    jsonschema = pytest.importorskip("jsonschema")
+
+    root = _repo_root()
+    schema = json.loads(
+        (root / "schemas" / "kernel-object.schema.json").read_text(encoding="utf-8")
+    )
+    manifest = json.loads(
+        (root / "examples" / "data" / "ffn-kernel-object.json").read_text(encoding="utf-8")
+    )
+    errors = sorted(jsonschema.Draft202012Validator(schema).iter_errors(manifest), key=str)
+    assert not errors, "\n".join(error.message for error in errors)
+
+
+def test_the_example_manifest_satisfies_f1_f2_f3() -> None:
+    root = _repo_root()
+    obj = load_object_file(root / "examples" / "data" / "ffn-kernel-object.json")
+    report = check_compiled_product(obj, key_count=KEY_COUNT, node_count=NODE_COUNT)
+    assert report.ok, report.format()
+
+
+def test_the_example_manifest_uses_the_documented_ffn_size() -> None:
+    root = _repo_root()
+    obj = load_object_file(root / "examples" / "data" / "ffn-kernel-object.json")
+    table = obj.find(ROUTE_TABLE_SYMBOL)
+    assert table is not None
+    assert table.size == 1280
+    assert table.addr_align == 64
+    assert table.kind is SymbolKind.READ_ONLY_OBJECT
+    assert table.section is Section.RODATA
