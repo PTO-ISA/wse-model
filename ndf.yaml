@@ -1,0 +1,20 @@
+format_version: "0.2"
+project: wse-model
+roots:
+  - docs/requirements/**/*.md
+id_prefixes:
+  - WSEMODEL
+domains:
+  - compiler
+  - model
+  - noc
+  - runtime
+  - tile
+policies: {}
+dependencies:
+  pycircuit:
+    path: vendor/pyCircuit
+    graph: true
+  pto-spec:
+    path: vendor/pto-spec
+    graph: true

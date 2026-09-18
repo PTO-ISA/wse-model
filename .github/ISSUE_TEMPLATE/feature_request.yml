@@ -1,0 +1,50 @@
+---
+name: Feature request
+description: Propose a modeling capability or a resolved design item
+title: "[feature] "
+labels: ["enhancement"]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - calendar
+        - noc
+        - core (AICORE)
+        - host (Batcher / UB / runtime)
+        - compiler
+        - analysis
+        - acir
+        - docs / tooling
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What the model cannot currently express, and why it matters.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: The modeling approach, including the exact widths and rules involved.
+    validations:
+      required: true
+  - type: textarea
+    id: source
+    attributes:
+      label: Design source
+      description: |
+        The whitepaper or Calendar section this comes from, or the open item it
+        resolves (whitepaper Appendix A `Q1`-`Q12`, Calendar §6.3 `S-*`/`C-*`).
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+    validations:
+      required: false

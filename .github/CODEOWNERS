@@ -1,0 +1,23 @@
+# Code owners for PTO-ISA/wse-model.
+#
+# Ownership follows docs/architecture and the two-layer model split. Update this
+# file in the same change that moves responsibility between areas.
+
+# Repository policy, governance, and CI
+*                                   @PTO-ISA/pycircuit-maintainers
+
+# Design sources are read-only; changes here need an owner review
+/docs/design/                       @PTO-ISA/pycircuit-maintainers
+
+# Model decisions and requirements
+/docs/decisions/                    @PTO-ISA/pycircuit-maintainers
+/docs/requirements/                 @PTO-ISA/pycircuit-maintainers
+
+# Semantic core
+/src/wse_model/calendar/            @PTO-ISA/pycircuit-maintainers
+/src/wse_model/noc/                 @PTO-ISA/pycircuit-maintainers
+/src/wse_model/analysis/            @PTO-ISA/pycircuit-maintainers
+
+# ACIR model layer and toolchain pinning
+/src/wse_model/acir/                @PTO-ISA/pycircuit-maintainers
+/tools/bootstrap-dev.sh             @PTO-ISA/pycircuit-maintainers

@@ -1,0 +1,10 @@
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.pdf binary
+*.gz binary
+*.whl binary
+
+docs/design/*.md linguist-documentation
+docs/golden/*.json linguist-generated

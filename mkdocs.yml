@@ -1,0 +1,69 @@
+site_name: WSE Model
+site_description: Architecture-level model of the WSE accelerator
+site_url: https://pto-isa.github.io/wse-model/
+repo_url: https://github.com/PTO-ISA/wse-model
+repo_name: PTO-ISA/wse-model
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.highlight
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+  - Roadmap: roadmap.md
+  - Design sources:
+      - System architecture whitepaper v0.1: design/wse-system-architecture-whitepaper.md
+      - Calendar scheme: design/wse-calendar-scheme.md
+  - Architecture:
+      - Overview: architecture/overview.md
+      - Calendar and NoC: architecture/calendar-noc.md
+      - AICORE: architecture/aicore.md
+      - Batcher and UB bus: architecture/batcher-ub.md
+      - Runtime and loading: architecture/runtime.md
+  - Requirements:
+      - Index: requirements/index.md
+      - Calendar closure: requirements/calendar-closure.md
+  - Decisions:
+      - Index: decisions/index.md
+      - "0001 Record decisions as ADRs": decisions/0001-record-decisions-as-adrs.md
+      - "0002 Two-layer model with a pure-Python semantic core": decisions/0002-two-layer-model.md
+      - "0003 Keep unresolved design items explicit": decisions/0003-keep-open-items-explicit.md
+      - "0004 Golden vectors are frozen contracts": decisions/0004-golden-vectors-are-contract.md
+  - Development:
+      - Getting started: development/getting-started.md
+      - Testing and gates: development/testing-and-gates.md
+      - Engineering standards: development/engineering-standards.md
+  - Reference:
+      - CLI: reference/cli.md
+      - Descriptors and schemas: reference/descriptors.md
+      - Open items: reference/open-items.md
+
+extra:
+  generator: false
