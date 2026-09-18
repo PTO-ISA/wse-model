@@ -186,6 +186,29 @@ def _build_parser() -> argparse.ArgumentParser:
         "runtime", parents=[common], help="load/launch tiers, dispatch chains, and constraints"
     )
 
+    # acir ----------------------------------------------------------------
+    acir = subparsers.add_parser(
+        "acir", help="the agentic_circuit (ACPy/ACIR) expression of the model"
+    )
+    acir_sub = acir.add_subparsers(dest="acir_command", required=True)
+    acir_sub.add_parser(
+        "info", parents=[common], help="describe the ACIR layer, its rules, and its gaps"
+    )
+    acir_lower = acir_sub.add_parser(
+        "lower", parents=[common], help="specialize the node system and lower it to ACIR"
+    )
+    acir_lower.add_argument("--node", type=int, default=0, help="fixed NoC node index")
+    acir_lower.add_argument(
+        "--node-count", type=int, default=40, help="NoC node count (40 baseline, 48 per Q1)"
+    )
+    acir_lower.add_argument(
+        "--epoch-tag-bits", type=int, default=8, help="epochTag width (C-5: 8..16)"
+    )
+    acir_lower.add_argument("--out", type=Path, help="write the ACIR text to this path")
+    acir_lower.add_argument(
+        "--lines", type=int, default=0, help="print only the first N lines (0 = all)"
+    )
+
     # check ---------------------------------------------------------------
     check = subparsers.add_parser("check", help="run the compiler product self-checks (F1/F2/F3)")
     check_sub = check.add_subparsers(dest="check_command", required=True)
@@ -536,6 +559,60 @@ def _cmd_check_package(args: argparse.Namespace) -> int:
     return 0 if report.ok else 1
 
 
+def _cmd_acir_info(args: argparse.Namespace) -> int:
+    from wse_model.acir.layer import describe_layer
+
+    _emit(describe_layer(), as_json=args.json)
+    return 0
+
+
+def _cmd_acir_lower(args: argparse.Namespace) -> int:
+    try:
+        import agentic_circuit as ac
+    except ImportError as exc:  # pragma: no cover - depends on the environment
+        raise WseModelError(
+            "the agentic_circuit frontend is not installed. It is not published on "
+            "PyPI: install it from a pyCircuit checkout with "
+            "'make bootstrap PYCIRCUIT_ROOT=../pyCircuit', and build the native "
+            "tools with 'make acir-tools PYCIRCUIT_ROOT=../pyCircuit'."
+        ) from exc
+
+    from wse_model.acir.model.top import acir_top
+
+    try:
+        specialization = ac.jit(
+            acir_top,
+            node_index=args.node,
+            node_count=args.node_count,
+            epoch_tag_bits=args.epoch_tag_bits,
+        )
+        text = specialization.lower_acir()
+    except Exception as exc:  # noqa: BLE001 - the frontend raises diagnostic types
+        raise WseModelError(
+            f"lowering failed for node_index={args.node}, "
+            f"node_count={args.node_count}, epoch_tag_bits={args.epoch_tag_bits}: {exc}"
+        ) from exc
+
+    if args.out:
+        Path(args.out).write_text(text, encoding="utf-8")
+    lines = text.splitlines()
+    shown = lines[: args.lines] if args.lines else lines
+    payload = {
+        "system": "acir_top",
+        "bindings": {
+            "node_index": args.node,
+            "node_count": args.node_count,
+            "epoch_tag_bits": args.epoch_tag_bits,
+        },
+        "acir_lines": len(lines),
+        "acir_bytes": len(text.encode("utf-8")),
+        "written_to": str(args.out) if args.out else None,
+        "text": "\n".join(shown),
+    }
+    _emit(payload, as_json=args.json, text="\n".join(shown))
+    return 0
+
+
 def _cmd_open_items(args: argparse.Namespace) -> int:
     wanted = None if args.status == "all" else Resolution(args.status)
     items = [
@@ -582,6 +659,8 @@ _HANDLERS = {
     "report.runtime": _cmd_report_runtime,
     "check.object": _cmd_check_object,
     "check.package": _cmd_check_package,
+    "acir.info": _cmd_acir_info,
+    "acir.lower": _cmd_acir_lower,
     "open-items": _cmd_open_items,
 }
 
@@ -600,6 +679,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         key = f"calendar.{args.calendar_command}"
     elif args.command == "check":
         key = f"check.{args.check_command}"
+    elif args.command == "acir":
+        key = f"acir.{args.acir_command}"
     else:
         key = args.command
 

@@ -51,11 +51,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   §19.1, with the two open inputs (`Q3`, `Q9`) required rather than defaulted.
 - Repository-standards gate (`tools/check_repo_standards.py`) and a script that
   builds the native ACIR tools (`tools/build-acir-tools.sh`).
-- The `agentic_circuit` model layer under `src/wse_model/acir/`, expressing the
-  same Calendar node semantics as schedulable ACIR processes.
+- The `agentic_circuit` (ACPy 0.5 / ACIR) model layer under
+  `src/wse_model/acir/`, expressing the same Calendar node semantics as a
+  schedulable queue graph: one `@ac.system` per fixed NoC node, the five rule
+  transitions (route-entry decode, passive hop, `CalReg` gate, epoch policy,
+  `expVal` accounting), a per-node `ac.jit` specialization, and
+  `wse-model acir info|lower` to report on it and lower it. Ten constraints of
+  the frontend are documented with their verbatim diagnostics in the layer's
+  `README.md`; the pure-Python core stays the authority.
+- A cross-layer agreement test that compares the lowered ACIR's own constants
+  against the core's encoding, which caught a real register-pair aliasing defect
+  (below).
+- The full documentation set under `docs/`: an architecture page per subsystem, a
+  compiler page, 126 numbered requirements each citing its proving test, six
+  decision records, development and reference pages, and a glossary.
+
+### Fixed
+
+- **ACIR register-pair aliasing.** The `routeBits` pair for a node below 32 was
+  computed as `(rbLo >> 2n) | (rbHi >> 0)`, so `rbHi[1:0]` — *node 32's* pair —
+  was OR-ed into every node below 32, giving a wrong egress set and spurious
+  landings. The rebased shift for those nodes must be at least the register width
+  so the term vanishes, not zero. The FFN fixture masked it because nodes 32..39
+  carry all-zero rows there; a dedicated cross-layer test now covers the boundary.
+- Accounting now follows the commit (Calendar §4.5.2 contract 3): an arrived but
+  uncommitted segment is countable only after `commit`, which is what makes MTE4
+  completion an acquire. Previously the contract had no test.
 
 ### Changed
 
+- The register-pair value type is named `CalendarRouteRegs`, matching the design
+  document's own name (§5.8) instead of the model's earlier `RoutePairRegs`.
+- `RedOp`'s numeric codes, which Calendar §2.4 does not fix, are now pinned by a
+  golden test and recorded against open item `C-10`; `C-7`'s note no longer
+  claims more than the model does.
 - The `agentic-circuit` frontend is not published on PyPI, so the model layer
   is bootstrapped from a `PTO-ISA/pyCircuit` checkout; the pure-Python
   semantic core keeps no runtime dependencies.
+- ACIR lowering tests are gated on the frontend rather than on `ACIR_OPT`, since
+  `lower_acir()` is toolchain-free; 52 ACIR tests now run without the native
+  build instead of skipping.
