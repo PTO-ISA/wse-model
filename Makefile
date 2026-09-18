@@ -43,6 +43,10 @@ contract: ## Run interface and schema contract tests
 integration: ## Run end-to-end model scenarios
 	$(PYTEST) tests/integration
 
+.PHONY: acir-tools
+acir-tools: ## Build the native ACIR tools from a pyCircuit checkout
+	bash tools/build-acir-tools.sh $(PYCIRCUIT_ROOT)
+
 .PHONY: acir
 acir: ## Run the ACIR model-layer tests (requires the native ACIR tools)
 	@if [ -z "$$ACIR_OPT" ]; then \

@@ -28,27 +28,27 @@ This repository is the executable model of that system.
 | **Calendar encoding** | `routeBits` bit-pair bitmap, `CalendarRouteEntry` layout, `keyId`/`opcode`/`redOp`/`expVal`, golden vectors | [Calendar §2](docs/design/wse-calendar-scheme.md) |
 | **Calendar validation** | legal bit pairs, induced-subgraph-is-a-tree, reachability, land-set completeness, send/receive conservation, `selfLand` consistency | [Calendar §2.7.2](docs/design/wse-calendar-scheme.md) |
 | **NoC** | 2D mesh topology, flit header overhead, stateless per-hop forwarding, `CalReg` slot release, merge/de-duplication | [Whitepaper §5](docs/design/wse-system-architecture-whitepaper.md), [Calendar §1.8](docs/design/wse-calendar-scheme.md) |
-| **AICORE** | Cube/Vector throughput, local DRAM bandwidth, L0A/L0B/L0C/L1/UB capacity, MTE1–MTE4 pipelines | [Whitepaper §3](docs/design/wse-system-architecture-whitepaper.md) |
-| **Batcher / UB bus** | single external entry point, dispatch and gather-back, cold-miss refill path | [Whitepaper §6](docs/design/wse-system-architecture-whitepaper.md) |
-| **Compiler** | group/collective recognition, phase splitting, immediate materialization, `.rodata` emission, self-checks F1–F3 | [Whitepaper §10, §13](docs/design/wse-system-architecture-whitepaper.md) |
-| **Runtime** | load / launch / steady-state frequencies, three-version check, `CalReg` atomic install, kickstart | [Whitepaper §12, §14](docs/design/wse-system-architecture-whitepaper.md) |
+| **AICORE** | Cube/Vector throughput with tile-accurate `M`-fill, local DRAM with the 2 KB page rule, L0A/L0B/L0C/L1/UB fit checks, MTE1–MTE4 pipeline independence | [Whitepaper §3](docs/design/wse-system-architecture-whitepaper.md) |
+| **Batcher / UB bus** | single external entry point, four responsibilities at three frequencies, the two disjoint paths, 9-lane bus, shared-`Batcher.mem` refill split | [Whitepaper §6](docs/design/wse-system-architecture-whitepaper.md) |
+| **Compiler** | the F1/F2/F3 compiled-product prohibitions over a declared symbol manifest | [Whitepaper §10](docs/design/wse-system-architecture-whitepaper.md), [Calendar §3.10](docs/design/wse-calendar-scheme.md) |
+| **Runtime** | load / per-launch / steady-state tiers, the three dispatch chains, three-version fault, `CalReg` install window, kickstart, wave and drain constraints | [Whitepaper §12, §14](docs/design/wse-system-architecture-whitepaper.md) |
+| **Performance analysis** | balance points and minimum batches, the five-block latency budget, the D-cache residency account, and both a first-order and a tile-accurate roofline verdict ([decision 0006](docs/decisions/0006-two-roofline-verdicts.md)) | [Whitepaper §19](docs/design/wse-system-architecture-whitepaper.md), [Calendar §3.8](docs/design/wse-calendar-scheme.md) |
 
 ## Repository layout
 
 ```text
 src/wse_model/
-  calendar/    routeBits codec, keys, opcodes, epochs, expVal, validation
-  noc/         2D mesh, flit format, stateless forwarding, CalReg
-  core/        AICORE pipelines, buffers, local DRAM
-  host/        Batcher, UB bus, runtime and loader
-  compiler/    frontend IR, group/collective lowering, table emission
-  analysis/    roofline, bandwidth budget, latency breakdown
+  calendar/    routeBits codec, keys, opcodes, epochs, expVal, validation, table
+  noc/         2D mesh, flit format, stateless forwarding, CalReg, delivery
+  core/        AICORE pipelines, local DRAM, on-chip buffers, Cube/Vector timing
+  host/        Batcher, UB bus, load/launch tiers, scheduling constraints
+  compiler/    compiled-product self-checks (F1/F2/F3)
+  analysis/    roofline, bandwidth, D-cache budget, latency breakdown
   acir/        agentic_circuit model modules (ACPy -> ACIR -> gfsim)
-  data/        canonical topology and platform descriptors (JSON)
 docs/          design sources, architecture, requirements, decisions
 schemas/       machine-readable schemas for descriptors and reports
-tests/         unit, contract, integration, golden
-tools/         developer and bootstrap scripts
+tests/         unit, contract, integration, golden, acir
+tools/         developer, bootstrap, and standards scripts
 examples/      runnable end-to-end scenarios
 ```
 
@@ -80,14 +80,20 @@ The pure-Python semantic core works with that alone:
 make check
 ```
 
-To build and simulate the `agentic_circuit` model layer you also need the
-pyCircuit checkout that provides the `agentic-circuit` distribution (it is not
-published on PyPI):
+To build and test the `agentic_circuit` model layer you also need a pyCircuit
+checkout, which provides the `agentic-circuit` distribution (it is not published
+on PyPI) and the native ACIR binaries:
 
 ```bash
 git clone https://github.com/PTO-ISA/pyCircuit.git ../pyCircuit
-make bootstrap PYCIRCUIT_ROOT=../pyCircuit
+make bootstrap PYCIRCUIT_ROOT=../pyCircuit      # Python frontend
+make acir-tools PYCIRCUIT_ROOT=../pyCircuit     # native acir-opt and friends
+make acir                                       # the ACIR-layer tests
 ```
+
+The native build needs LLVM/MLIR 22.1.8; `tools/build-acir-tools.sh` finds it
+automatically under Homebrew or `/usr/lib/llvm-22`, or takes `LLVM_DIR` and
+`MLIR_DIR`. The default gate deliberately does not require it.
 
 ## Quick start
 
@@ -108,6 +114,15 @@ wse-model calendar emit --layout node-major
 
 # Run the FFN two-phase AllGather closure end to end
 wse-model run ffn-allgather
+
+# AICORE timing, the Batcher/runtime picture, and the D-cache budget
+wse-model report matmul --m 1 --k 4096 --n 4096 --precision fp16
+wse-model report host
+wse-model report runtime
+wse-model report dcache
+
+# The compiled-product self-checks of Calendar §3.10
+wse-model check object --example
 
 # Closed-form analysis and the unresolved design items
 wse-model report roofline
