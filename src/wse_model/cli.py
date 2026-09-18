@@ -46,7 +46,7 @@ from wse_model.host import (
     dispatch_paths,
 )
 from wse_model.host.ub_bus import local_dram_over_fabric_ratio
-from wse_model.noc import CalRegImage, CalRegSlot, Noc
+from wse_model.noc import Noc
 from wse_model.open_items import OPEN_ITEMS, Resolution
 from wse_model.topology import CALENDAR_BASELINE, PROFILES, topology_profile
 
@@ -224,8 +224,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--concurrent",
         action="store_true",
         help=(
-            "declare the two logical identities concurrent, which the "
-            "same-opcode rule must refuse"
+            "declare the two logical identities concurrent, which the same-opcode rule must refuse"
         ),
     )
 
@@ -337,18 +336,7 @@ def _cmd_calendar_emit(args: argparse.Namespace) -> int:
 
 def _cmd_run_ffn(args: argparse.Namespace) -> int:
     example = ffn_example(layout=TableLayout(args.layout))
-    calreg = CalRegImage(
-        slots=(
-            CalRegSlot(
-                opcode=1,
-                content=b"\x01",
-                arm_lead_cycles=64,
-                identities=("ffn:phase_b", "ffn:phase_c"),
-            ),
-        ),
-        calendar_version=1,
-    )
-    noc = Noc(example.table.topology, calreg=calreg)
+    noc = Noc(example.table.topology, calreg=example.calreg())
 
     reports = []
     if args.phase in ("b", "both"):
@@ -526,20 +514,9 @@ def _cmd_check_package(args: argparse.Namespace) -> int:
     from wse_model.fixtures import clean_kernel_object
 
     example = ffn_example()
-    calreg = CalRegImage(
-        slots=(
-            CalRegSlot(
-                opcode=1,
-                content=b"\x01",
-                arm_lead_cycles=64,
-                identities=("ffn:phase_b", "ffn:phase_c"),
-            ),
-        ),
-        calendar_version=1,
-    )
     package = build_package(
         table=example.table,
-        calreg=calreg,
+        calreg=example.calreg(),
         kernel_object=clean_kernel_object(),
         weight_shard_bytes=(2048, 2048),
         conflict_proofs={0: "fixture:no-conflict-key0", 1: "fixture:no-conflict-key1"},
@@ -553,9 +530,7 @@ def _cmd_check_package(args: argparse.Namespace) -> int:
     payload = {
         **package.describe(),
         **report.describe(),
-        "concurrency_declared": sorted(
-            sorted(pair) for pair in concurrent
-        ),
+        "concurrency_declared": sorted(sorted(pair) for pair in concurrent),
     }
     _emit(payload, as_json=args.json, text=report.format())
     return 0 if report.ok else 1

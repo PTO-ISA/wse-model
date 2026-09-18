@@ -38,6 +38,7 @@ from wse_model.calendar.table import (
     build_table,
 )
 from wse_model.errors import CalendarError
+from wse_model.noc.calreg import CalRegImage, CalRegSlot
 from wse_model.topology import (
     CALENDAR_BASELINE,
     FFN_CELL_ROWS,
@@ -170,6 +171,30 @@ class FFNExample:
 
     def groups(self, key_id: int) -> dict[int, tuple[int, ...]]:
         return self.phase_b_groups if key_id == 0 else self.phase_c_groups
+
+    def calreg(self, *, arm_lead_cycles: int = 64) -> CalRegImage:
+        """The timeslot mirror the loader installs.
+
+        Both FFN phases use opcode 1 and therefore share one ``CalReg[1]`` entry,
+        so that single slot lists both identities: the sharing constraint of
+        Calendar §2.3.1 then shows up in the artifact, not only in the rule.
+        """
+        identities = tuple(
+            definition.route_key.phase_id for definition in self.table.ordered_keys()
+        )
+        opcodes = sorted({definition.opcode for definition in self.table.ordered_keys()})
+        return CalRegImage(
+            slots=tuple(
+                CalRegSlot(
+                    opcode=opcode,
+                    content=bytes([opcode]),
+                    arm_lead_cycles=arm_lead_cycles,
+                    identities=identities,
+                )
+                for opcode in opcodes
+            ),
+            calendar_version=self.table.calendar_version,
+        )
 
     def arena(self, key_id: int, *, recv_sym_base: int = 0x1000) -> SymmetricArena:
         """One group's arena; the layout is identical for every group."""

@@ -18,7 +18,7 @@ import json
 
 from wse_model.collective import run_allgather
 from wse_model.fixtures import ffn_example
-from wse_model.noc import CalRegImage, CalRegSlot, Noc
+from wse_model.noc import Noc
 
 
 def main() -> int:
@@ -31,18 +31,7 @@ def main() -> int:
     print(report.format())
 
     # Install the timeslot register once, in a drained window (Calendar §3.9).
-    calreg = CalRegImage(
-        slots=(
-            CalRegSlot(
-                opcode=1,
-                content=b"\x01",
-                arm_lead_cycles=64,
-                identities=("ffn:phase_b", "ffn:phase_c"),
-            ),
-        ),
-        calendar_version=1,
-    )
-    noc = Noc(table.topology, calreg=calreg)
+    noc = Noc(table.topology, calreg=example.calreg())
 
     for label, key_id, geometry, groups in (
         ("phase B: ROW AllGather", 0, example.phase_b_geometry, example.phase_b_groups),
