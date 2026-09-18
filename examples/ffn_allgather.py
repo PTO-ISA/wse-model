@@ -48,9 +48,7 @@ def main() -> int:
         ("phase B: ROW AllGather", 0, example.phase_b_geometry, example.phase_b_groups),
         ("phase C: COL AllGather", 1, example.phase_c_geometry, example.phase_c_groups),
     ):
-        outcome = run_allgather(
-            noc, table, key_id, geometry=geometry, groups=groups
-        )
+        outcome = run_allgather(noc, table, key_id, geometry=geometry, groups=groups)
         outcome.check()
         first = outcome.states[0]
         print(f"\n== {label} ==")
@@ -62,7 +60,9 @@ def main() -> int:
         print(f"  peak link load     : {outcome.peak_link_load} flits")
         print(f"  payload delivered  : {outcome.total_payload_bytes} B")
         print(f"  wire bytes         : {outcome.total_wire_bytes} B")
-        print(f"  useful payload     : {100.0 * outcome.total_payload_bytes / outcome.total_wire_bytes:.1f}%")
+        print(
+            f"  useful payload     : {100.0 * outcome.total_payload_bytes / outcome.total_wire_bytes:.1f}%"
+        )
         print(f"  complete           : {outcome.ok}")
 
     print(f"\ndie drained after the launch: {noc.drained}")

@@ -87,6 +87,7 @@ ignore = ["E501"]
 "src/wse_model/cli.py" = ["T201"]
 "tests/**/*.py" = ["T201", "N803", "N806"]
 "tools/*.py" = ["T201"]
+"examples/**/*.py" = ["T201", "N803", "N806"]
 
 [tool.ruff.format]
 quote-style = "double"
