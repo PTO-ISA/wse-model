@@ -51,6 +51,7 @@ REQUIRED_FILES = (
     ".github/pull_request_template.md",
     ".github/workflows/ci.yml",
     ".github/workflows/docs.yml",
+    ".github/workflows/release.yml",
     "docs/design/MANIFEST.json",
     "docs/design/wse-system-architecture-whitepaper.md",
     "docs/design/wse-calendar-scheme.md",
@@ -63,6 +64,9 @@ FORBIDDEN_TRAILERS = (
 )
 
 TEXT_SUFFIXES = {".py", ".md", ".toml", ".yml", ".yaml", ".json", ".cfg", ".txt", ".sh"}
+
+#: This file defines the patterns above, so it necessarily contains them.
+TRAILER_SCAN_EXEMPT = {"tools/check_repo_standards.py"}
 
 
 def _fail(violations: list[str], message: str) -> None:
@@ -200,6 +204,8 @@ def check_forbidden_trailers(violations: list[str]) -> None:
         # Not a git checkout: skip rather than report a false violation.
         return
     for relative in tracked:
+        if relative in TRAILER_SCAN_EXEMPT:
+            continue
         path = REPO_ROOT / relative
         if path.suffix not in TEXT_SUFFIXES or not path.is_file():
             continue
