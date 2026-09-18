@@ -239,6 +239,7 @@ accepted, and so is calling an `ac.BitfieldSpec` instance:
 ```python
 FIELDS = ac.BitfieldSpec(width=16, fields={"lo": (7, 0), "hi": (15, 8)})
 
+
 @ac.rule
 def keep(v):
     return v.with_fields(word=FIELDS(v.word).lo)
