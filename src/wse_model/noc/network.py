@@ -273,11 +273,14 @@ class Noc:
 
 
 def table_layout_lines(table: CalendarRouteTable, *, layout: TableLayout | None = None) -> int:
-    """Per-core D-cache residency for a table under a layout (open item ``C-9``)."""
+    """Per-core D-cache residency for a table under a layout (open item ``C-9``).
+
+    ``layout`` overrides the table's own layout, which is what makes the
+    key-major versus node-major comparison possible without re-emitting: the
+    entries are the same 16 B objects, only their order changes.
+    """
     chosen = layout or table.layout
-    if chosen is TableLayout.NODE_MAJOR:
-        return chosen.d_cache_lines_per_core(table.key_count)
-    return table.d_cache_lines_per_core
+    return chosen.d_cache_lines_per_core(table.key_count)
 
 
 def allgather_geometry_check(

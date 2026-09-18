@@ -350,3 +350,33 @@ def test_zero_length_payload_needs_no_flits() -> None:
 def test_mesh_rejects_degenerate_dimensions() -> None:
     with pytest.raises(TopologyError):
         MeshTopology(rows=0, cols=8)
+
+
+def test_table_layout_lines_helper_matches_the_layout() -> None:
+    """The documented helper for the C-9 comparison."""
+    from wse_model.calendar.table import TableLayout
+    from wse_model.fixtures import ffn_example
+    from wse_model.noc.network import table_layout_lines
+
+    key_major = ffn_example(layout=TableLayout.KEY_MAJOR).table
+    node_major = ffn_example(layout=TableLayout.NODE_MAJOR).table
+    assert table_layout_lines(key_major) == 2
+    assert table_layout_lines(key_major, layout=TableLayout.NODE_MAJOR) == 1
+    assert table_layout_lines(node_major) == 1
+    assert table_layout_lines(node_major, layout=TableLayout.KEY_MAJOR) == 2
+
+
+def test_allgather_geometry_check_accepts_allgather_and_rejects_the_rest() -> None:
+    from wse_model.calendar.collective import Collective
+    from wse_model.calendar.geometry import SymmetricArena
+    from wse_model.noc.network import allgather_geometry_check
+
+    arena = SymmetricArena.packed(
+        recv_sym_base=0, row_count=8, row_bytes=192, member_ranks=(0, 1, 2, 3)
+    )
+    allgather_geometry_check(collective=Collective.ALL_GATHER, geometry_rows=8, arena=arena)
+    with pytest.raises(CalendarError) as excinfo:
+        allgather_geometry_check(collective=Collective.REDUCE, geometry_rows=8, arena=arena)
+    assert "C-10" in str(excinfo.value)
+    with pytest.raises(CalendarError):
+        allgather_geometry_check(collective=Collective.ALL_GATHER, geometry_rows=4, arena=arena)
