@@ -56,7 +56,8 @@ def hop_egress(event: CalEvent) -> ac.bits[40]:
 
     The pass bitmap is what the NoC replicates over; the ingress-port subtraction
     is a NoC-side reduction over that bitmap, because the ingress port is runtime
-    data and this frontend cannot express dynamic bit selection.
+    data. Leaving that subtraction to the NoC is a modelling choice, not a frontend
+    limit; a dynamic shift is accepted (README.md constraint 4).
     """
     return event.lane
 

@@ -230,7 +230,8 @@ def apply_forward(v):
     ``passes``/``lands`` are the two Calendar rules for this node's own bits;
     ``egress`` is the node bitmap the NoC replicates over. Rule 2's ``- ingress``
     term is a NoC-side reduction over that bitmap because the ingress port is
-    runtime data and this frontend cannot express dynamic bit selection.
+    runtime data; leaving its subtraction to the NoC is a modelling choice, not a
+    frontend limit (README.md constraint 4).
     """
     return v.with_fields(
         egress=v.lane,

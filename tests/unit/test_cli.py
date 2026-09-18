@@ -208,9 +208,20 @@ def test_acir_info_describes_the_layer_without_a_toolchain(capsys) -> None:
         "epoch_policy",
         "recv_wait",
     ]
-    # The gap list is read from the layer's README, so it cannot drift from it.
-    assert payload["gap_count"] == len(payload["documented_gaps"]) > 0
-    assert any("single file" in gap for gap in payload["documented_gaps"])
+    # The list is read from the layer's README, so it cannot drift from it; each
+    # entry says whether it is a reproduced constraint, a modelling choice, or a
+    # claim that was refuted.
+    items = payload["frontend_constraints_and_choices"]
+    assert (
+        items
+        and len(items)
+        == payload["constraint_count"] + payload["choice_count"] + payload["refuted_count"]
+    )
+    verdicts = {item["verdict"] for item in items}
+    assert verdicts == {"constraint", "choice", "refuted"}
+    # The three refuted entries are kept visible so nobody re-derives them.
+    assert payload["refuted_count"] == 3
+    assert any("source closure" in item["title"] for item in items)
 
 
 def test_acir_info_lists_the_build_path(capsys) -> None:

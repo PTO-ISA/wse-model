@@ -16,9 +16,11 @@ Two facts are worth stating about what this layer can and cannot express.
 * The pair, ``P``/``L``, and the egress bitmap are derived facts of the *fixed*
   node's own two bits, so the frontend folds them to closed constants.
 * The ``- ingress`` term of rule 2 needs the ingress port's ``P`` bit, and the
-  ingress port is runtime data. Dynamic bit selection is not expressible in this
-  frontend (see ``README.md``), so ``egress`` is the pass bitmap the NoC
-  replicates over and the ingress subtraction happens in the NoC's reduction.
+  ingress port is runtime data. This layer deliberately leaves that subtraction to
+  the NoC and has ``egress`` carry the pass bitmap the NoC replicates over. This
+  is a **modelling choice, not a frontend limit**: a dynamic shift is accepted
+  (``ac.truncate(lane >> dynamic_ingress, ac.u1)``), so the term could be computed
+  here. ``README.md`` constraint 4 records the correction.
 
 ``egress_set`` below is the exact Python mirror of the hardware rule, exposed so
 the test can assert the ACIR-derived bitmap against it without re-deriving

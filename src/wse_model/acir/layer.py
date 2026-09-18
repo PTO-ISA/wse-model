@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-__all__ = ["describe_layer", "gaps"]
+__all__ = ["describe_layer", "documented_items"]
 
 _README = Path(__file__).with_name("README.md")
 
@@ -47,16 +47,36 @@ BUILD_COMMANDS: tuple[tuple[str, str], ...] = (
 )
 
 
-def gaps() -> tuple[str, ...]:
-    """The gap headings of ``README.md``'s "Gaps against the semantic core"."""
+#: The README section that records what the frontend does and does not allow.
+_SECTION = "## Frontend constraints and modelling choices"
+
+_HEADING = re.compile(r"^### (\d+)\.\s*(constraint|choice|refuted)\s*[—–-]\s*(.+)$", re.M)
+
+
+def documented_items() -> tuple[dict[str, object], ...]:
+    """Parse the README's constraint / choice / refuted entries.
+
+    Read from the prose rather than restated here, so the CLI report cannot drift
+    from the document it summarises. The verdict matters: a ``constraint`` was
+    reproduced against the frontend, a ``choice`` is this layer's own decision,
+    and a ``refuted`` entry is a claim that did not reproduce and is kept visible
+    so nobody re-derives it.
+    """
     if not _README.is_file():  # pragma: no cover - the file ships with the package
         return ()
     text = _README.read_text(encoding="utf-8")
-    section = text.split("## Gaps against the semantic core", 1)
-    if len(section) != 2:
+    sections = text.split(_SECTION, 1)
+    if len(sections) != 2:
         return ()
-    body = section[1].split("\n## ", 1)[0]
-    return tuple(match.group(1).strip() for match in re.finditer(r"^### \d+\.\s*(.+)$", body, re.M))
+    body = sections[1].split("\n## ", 1)[0]
+    return tuple(
+        {
+            "n": int(match.group(1)),
+            "verdict": match.group(2),
+            "title": match.group(3).strip(),
+        }
+        for match in _HEADING.finditer(body)
+    )
 
 
 def describe_layer() -> dict[str, object]:
@@ -80,8 +100,12 @@ def describe_layer() -> dict[str, object]:
         "build_commands": [
             {"command": command, "purpose": purpose} for command, purpose in BUILD_COMMANDS
         ],
-        "documented_gaps": list(gaps()),
-        "gap_count": len(gaps()),
+        "frontend_constraints_and_choices": [dict(item) for item in documented_items()],
+        "constraint_count": sum(
+            1 for item in documented_items() if item["verdict"] == "constraint"
+        ),
+        "choice_count": sum(1 for item in documented_items() if item["verdict"] == "choice"),
+        "refuted_count": sum(1 for item in documented_items() if item["verdict"] == "refuted"),
         "toolchain_required": (
             "yes for lowering (@ac.rule and @ac.module need acir-opt); no for the "
             "pure-Python syntax tests, which parse the real source files"

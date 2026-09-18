@@ -90,40 +90,57 @@ $ ACIR_OPT=... /Users/zhoubot/dev/.venvs/wse-model/bin/python -c \
 `tests/acir/test_acir_lower.py` is `pytest.mark.acir` and skips cleanly when
 `ACIR_OPT` is unset, so `make check` stays green without the toolchain.
 
-## Gaps against the semantic core
+## Frontend constraints and modelling choices
 
-Every gap below is a frontend constraint, not a semantic choice. Each was hit by
-running the real files; the diagnostic text is quoted verbatim.
+Every entry below was re-verified against the frontend at the pinned revision,
+either by parsing the real files in this package or by a minimal reproducer. Each
+one is labelled for what it actually is:
 
-### 1. The source closure accepts only a single file, so the entry is self-contained
+* **constraint** — reproduced: the frontend rejects the construct.
+* **choice** — the frontend would allow it; this layer does something else, and
+  the reason is stated rather than implied.
+* **refuted** — asserted earlier in this document and found **not** to reproduce;
+  the corrected statement is given instead. Three entries are in this class, and
+  they are kept visible rather than deleted so nobody re-derives them.
 
-`ac.jit(system, workspace=<root>)` builds a *source closure* by walking static
-imports. Every realistic layout for this package fails. Observed diagnostics:
+Two constraints are filed upstream:
+[PTO-ISA/pyCircuit#158](https://github.com/PTO-ISA/pyCircuit/issues/158) (the
+source closure) and
+[PTO-ISA/pyCircuit#159](https://github.com/PTO-ISA/pyCircuit/issues/159) (two
+misleading diagnostics and a stale marker inventory).
 
-* workspace above the package root —
-  `ACPY-JIT-006: external import 'collections.abc' is not allowed in wse_model/topology.py`
-  (the walk pulls `wse_model/__init__.py`, whose imports reach the semantic core).
-* `from wse_model.acir.blocks.calreg import ...` with the workspace at `src/wse_model` —
-  `ACPY-JIT-006: external import 'wse_model.acir.contract.payloads' is not allowed in
-  acir/blocks/route_entry.py`.
-* the same absolute import with the workspace at `src/wse_model/acir`,
-  the only root under which `_module_candidates` resolves `blocks/calreg.py` —
-  still ends in `ACPY-JIT-006: external import 'wse_model.acir.contract.payloads' is not
-  allowed in acir/blocks/route_entry.py`, because `_import_targets` resolves an
-  absolute import against `source.parent + module_parts` rather than the package
-  root.
-* a local import in the package initializer —
-  `ACPY-JIT-006: external import 'wse_model.acir.model.top' is not allowed in acir/__init__.py`.
+### 1. constraint — the source closure accepts only three external modules, and needs the package's parent as workspace
+
+`ac.jit(system, workspace=<root>)` walks static imports and rejects anything
+outside `_ALLOWED_EXTERNAL_MODULES = {"__future__", "agentic_circuit", "enum"}`
+(`_source_closure.py:42`). A captured module importing `collections.abc`,
+`typing`, `math`, `dataclasses`, or `pathlib` therefore fails:
+
+```text
+SourceClosureError: ACPY-JIT-006: external import 'collections.abc' is not allowed in pkg/types.py
+```
+
+**Reproduced minimally**: a two-module package whose `types.py` contains only
+`from collections.abc import Iterable` plus one `@ac.struct`. Removing that one
+import makes the same capture succeed (1258 B of ACIR), so the import is the sole
+trigger. The other stdlib modules named above fail the same way.
+
+The second half of the same behaviour: `workspace` must be the directory
+**containing** the root package. Pointing it at the package root instead makes an
+absolute self-import fail, with a message that sends the reader in the wrong
+direction:
+
+```text
+SourceClosureError: ACPY-JIT-006: external import 'pkg.types' is not allowed in top.py
+```
 
 **Consequence.** `model/top.py` declares the one payload struct, the widths it
-uses, and the five rules. The blocks keep the pure helpers. `wse_model.acir`
-therefore re-exports nothing (`__all__` is empty) to keep the closure importable,
-and the entry is imported as `from wse_model.acir.model.top import
-node_lowering_spec`.
+uses, and the five rules; the blocks keep the pure helpers. `wse_model.acir`
+re-exports nothing (`__all__` is empty) so the closure never walks its package
+initializer, and the entry is imported as
+`from wse_model.acir.model.top import node_lowering_spec`.
 
-### 2. `@ac.module` cannot resolve a payload type
-
-The natural composition is a module:
+### 2. constraint — `@ac.module` cannot resolve an imported payload type
 
 ```python
 @ac.module
@@ -132,103 +149,160 @@ def node_engine(value: CalEvent, node_index: ac.const[int]) -> CalEvent:
     return apply_forward(row)
 ```
 
-Both forms fail:
+Parsed with `entry_kind="module"` and `CalEvent` imported from another file:
 
-* pure module with an annotated struct parameter/return, single file and
-  multi-file alike —
-  `agentic_circuit._queue_frontend.QueueFrontendError: ACPY-QUEUE-002: source payload must be a
-  compile-time supported type`;
-* rule-backed module —
-  `ACPY-MODULE-005: rule module return names must match its arity`, and with the
-  documented "return a local from the last rule call" shape,
-  `ACPY-QUEUE-002: source payload must be a compile-time supported type`.
+```text
+QueueFrontendError: ACPY-QUEUE-002: source payload must be a compile-time supported type
+```
 
-`_lower_simple_module_source` resolves the module's return annotation against a
-payload map built only from the file being parsed, so any imported or dependent
-type is unresolvable there even though `ac.source(CalEvent, ...)` in the system
-body resolves fine.
+`_lower_simple_module_source` resolves the module's parameter and return
+annotations against a payload map built only from the file being parsed, so any
+imported or dependent type is unresolvable there even though
+`ac.source(CalEvent, ...)` in an `@ac.system` body resolves the same name fine.
 
 **Consequence.** `model/top.py` chains the rules explicitly. The graph is
 identical — five `ac.rule` transitions, one atomic transaction each — and
 `model/node.py` keeps the node's closed predicates (`node_pair`, `hop_egress`,
 `landing_ok`).
 
-### 3. A `Table` entry type must be declared in the entry file
+### 3. constraint — a `Table` entry type must be declared in the same file
 
-`ac.table[8, CalEvent]` with `CalEvent` imported from another module fails with
-`ACPY-QUEUE-002: source payload must be a compile-time supported type`, because
-`table_declaration` resolves the entry type against the same entry-file payload
-map as gap 2.
+`ac.table[4, S]` where `S` is imported fails the same way, for the same reason
+(`table_declaration` uses the entry-file payload map):
 
-**Consequence.** The layer keeps exactly one payload type and carries the
-resident state as compact vectors inside it: `calreg` is an 8 bit residency
-bitmap where `bit i` *is* `CalReg[i].installed`, and `ctr` is a 64 bit vector of
-eight 8 bit epoch lanes indexed by `opcode * 8`. Semantically that is the same
-per-`opcode` state the core keeps in `CalRegBank`/`EpochTracker`; only its
-carrier differs.
+```text
+QueueFrontendError: ACPY-QUEUE-002: source payload must be a compile-time supported type
+```
 
-### 4. Dynamic bit selection is not expressible
+**Consequence.** The layer keeps exactly one payload type and carries the resident
+state as compact vectors inside it: `calreg` is an 8 bit residency bitmap where
+`bit i` *is* `CalReg[i].installed`, and `ctr` is a 64 bit vector of eight 8 bit
+epoch lanes indexed by `opcode * 8`. Semantically that is the same per-`opcode`
+state the core keeps in `CalRegBank`/`EpochTracker`; only the carrier differs.
 
-The frontend has no dynamic bit-slice or index expression, so two core facts are
-modelled by the closest faithful thing:
+### 4. refuted — "dynamic bit selection is not expressible"; the egress `- ingress` term is a modelling choice
 
-* **Egress `- ingress` (Calendar §2.2 rule 2).** The egress bitmap is the pass
-  bitmap the NoC replicates over; the ingress-port subtraction is a NoC-side
-  reduction over that bitmap, because the ingress port is runtime data and its
-  `P` bit cannot be selected dynamically. `blocks/forward.py:egress_set` is the
-  exact Python mirror, asserted by the test.
-* **Epoch lanes.** `ctr` is one 64 bit scalar, so it holds eight 8 bit lanes: the
-  Calendar baseline `epoch_tag_bits = 8`. A wider `C-5` reading (9-16 bit) needs
-  a wider vector than a 64 bit scalar can hold and is **not** modelled here;
-  `top.py` still static-asserts the 8-16 bit range, and the epoch value itself is
-  an 8 bit field.
+Calendar §2.2 rule 2 is `out = { neighbour j : P_j = 1 } - ingress`. The ingress
+port is runtime data, so applying it means selecting a bit at a dynamic position.
 
-### 5. Scalars are limited to 64 bits, so `routeBits` stays a register pair
+**This was previously recorded here as a frontend limitation, and that was
+wrong.** A dynamic shift is accepted:
 
-`2 x node_count` is 80 bit at the Calendar baseline and cannot be one scalar.
+```python
+@ac.rule
+def pick(v):
+    return v.with_fields(idx=ac.truncate(v.lane >> v.idx, ac.u8))
+```
+
+parses cleanly, so `ac.truncate(lane >> dynamic_ingress, ac.u1)` — the term the
+rule actually needs — is expressible.
+
+So the current treatment is a **modelling choice, not a constraint**: the
+flit's `lane` carries the pass bitmap, `apply_forward` republishes it as the
+egress bitmap, and `blocks/forward.py:egress_set` is the exact Python oracle the
+test asserts against — but the ingress subtraction is left to the NoC. Implementing
+it in ACIR would make the node model self-contained and is the natural next
+increment; it is not blocked by the frontend.
+
+### 5. constraint — scalars are limited to 64 bits, so `routeBits` stays a register pair
+
+`ac.bits[N]` rejects `N > 64` (`ACPY-TYPE-003`) and `ac.uNN` stops at `ac.u64`.
+`2 x node_count` is 80 bit at the Calendar baseline, so it cannot be one scalar.
 The layer keeps `rbLo`/`rbHi` exactly as the hardware does; the derived `lane`
 field is `node_count` bits and holds the decoded pair, not the full 80 bit map.
 
-### 6. A struct body must be annotations only
+A second consequence: `ctr` is one 64 bit scalar holding eight 8 bit epoch lanes,
+which covers the Calendar baseline `epoch_tag_bits = 8`. A wider `C-5` reading
+(9-16 bit) would need a wider vector than a 64 bit scalar provides and is **not**
+modelled; `top.py` still static-asserts the 8-16 bit range, and the epoch value
+itself is an 8 bit field.
+
+### 6. constraint — a struct body must be annotations only
 
 A class docstring inside an `@ac.struct` body raises
-`ACPY-QUEUE-002: struct body requires annotated fields`. In `model/top.py` the
-payload documentation is therefore a comment block above the class.
 
-### 7. Helper-function calls are not rules expressions
+```text
+QueueFrontendError: ACPY-QUEUE-002: struct body requires annotated fields
+```
 
-`ACPY-QUEUE-003: unsupported lambda or rule expression 'RBHI_FIELDS(v.rbHi)'`
-(and the same for plain helper calls). A rule body can call only the closed
-intrinsic set (`ac.literal`, `ac.zext`, `ac.sext`, `ac.truncate`, `ac.concat`,
-`ac.insert`, `ac.matches`, the count/encode primitives, `ac.checked`, `ac.wrap`,
-`ac.saturate`, `ac.refine`, the enum helpers) plus operators, so the entry file
-spells the `rbHi` field extraction with `truncate`/`>>` rather than calling the
-`BitfieldSpec`. The spec itself is still declared and is emitted into the ACIR as
-`ac.bitfield @RBHI_FIELDS` with the documented boundaries.
+although the annotated fields are present. In `model/top.py` the payload
+documentation is therefore a comment block above the class. Filed upstream as
+part of [#159](https://github.com/PTO-ISA/pyCircuit/issues/159), because the
+diagnostic names the wrong problem.
 
-### 8. `**` is not an operator; a literal width is required in decorators
+### 7. refuted — helper-function calls in rule bodies
 
-`ACPY-QUEUE-003: unsupported lambda or rule expression '2 ** 5'`, and
-`ACPY-TYPE-003: bits width must be in [1, 64]; field Sample.lane has annotation
-'ac.bits[2 * 40]'`. The epoch capacity `2 ** epoch_tag_bits - 1` is therefore
-materialised as a constant (`EPOCH_CAPACITY_8`) rather than computed in ACIR, and
-`@ac.encoding(width=...)` takes a literal.
+Previously recorded here as `ACPY-QUEUE-003: unsupported lambda or rule
+expression`. **Not reproduced.** A rule body calling a user-defined helper is
+accepted, and so is calling an `ac.BitfieldSpec` instance:
 
-### 9. The de-duplication set is bounded
+```python
+FIELDS = ac.BitfieldSpec(width=16, fields={"lo": (7, 0), "hi": (15, 8)})
 
-The frontend has no unbounded set, so `seen` is a 64 bit one-hot bitmap over
-`seq` and the model faults (rather than aliasing) past 64 distinct segment
-identities. The core's `SegmentId` set is unbounded; this cap is the modelling
-gap, and it is recorded rather than hidden. Calendar §4.5.2 contract 5 (and
-`S-6`) require identity de-duplication, which the bitmap does provide for the
-admitted window.
+@ac.rule
+def keep(v):
+    return v.with_fields(word=FIELDS(v.word).lo)
+```
 
-### 10. Unbounded-before-the-command arrivals are not modelled
+parses cleanly. `model/top.py` still spells the `rbHi` extraction with
+`truncate`/`>>` — that is now simply a style choice, kept because the explicit
+form mirrors the register boundaries one for one. `RBHI_FIELDS` is declared and
+emitted as `ac.bitfield @RBHI_FIELDS` with the documented boundaries.
 
-Contract 4 ("legal arrivals that predate the command must not be missed")
-belongs to the core's `CoreIngress` ledger. The ACIR layer keys adoption on
+### 8. refuted — `**` and computed widths
+
+Previously recorded here as `2 ** 5` being unsupported and decorator widths
+needing literals. **Neither reproduces**: `ac.truncate(2 ** 5, ac.u8)` inside a
+rule and `@ac.encoding(width=2 * 2)` both parse.
+
+The rejection that *does* exist is the width bound, and it is correct:
+`ac.bits[2 * 40]` fails with
+
+```text
+ACPY-TYPE-003: bits width must be in [1, 64]; field S.lane has annotation 'ac.bits[2 * 40]'
+```
+
+because the product is 80. `ac.bits[2 * SMALL]` (16) and `ac.bits[K + K]` are
+accepted, so arithmetic inside `bits[...]` works. `EPOCH_CAPACITY_8` is a named
+constant for readability, not because the expression is rejected.
+
+### 9. choice — the de-duplication set is bounded
+
+The layer's `seen` is a 64 bit one-hot bitmap over `seq` and faults rather than
+aliasing past 64 distinct segment identities. The core's `SegmentId` set is
+unbounded; this cap is a modelling gap, recorded rather than hidden. Calendar
+§4.5.2 contract 5 (and `S-6`) require identity de-duplication, which the bitmap
+does provide for the admitted window.
+
+### 10. choice — pre-command arrivals are not modelled
+
+Contract 4 ("legal arrivals that predate the command must not be missed") belongs
+to the core's `CoreIngress` ledger. The ACIR layer keys adoption on
 `{opcode, epoch}` and has no pre-command buffer, so it is a **partial** mirror of
 that contract. The core's `CoreIngress` remains the authority.
+
+### Reproducing these verdicts
+
+The constraints were re-checked with the frontend's own parser, which needs no
+native toolchain:
+
+```bash
+python - <<'PY'
+from agentic_circuit._queue_frontend import parse_queue_program
+
+def case(name, body):
+    try:
+        parse_queue_program("import agentic_circuit as ac\n\n" + body, "top")
+        print("ACCEPTED  ", name)
+    except Exception as exc:
+        print(f"{type(exc).__name__}: {str(exc).strip().splitlines()[0]}   <-- {name}")
+PY
+```
+
+and the closure behaviour with `ac.jit(system, workspace=...)` over a two-module
+package. `tests/acir/test_layer_agreement.py` keeps the cross-layer arithmetic
+honest; the verdicts above are documentation, not tests, because the frontend's
+behaviour is outside this repository's control.
 
 ## Not a disagreement with the design documents
 
@@ -239,7 +313,7 @@ than choosing:
   48-node specializations lower to different ACIR (the folded shift constants
   differ, exactly as the register-pair boundary predicts).
 * `C-5` epoch width: static-asserted to the documented 8-16 bit range, with only
-  the 8 bit lane modelled (gap 4).
+  the 8 bit lane modelled (constraint 5).
 
 No value the sources leave open is defaulted silently: `node_count`,
 `node_index`, and `epoch_tag_bits` are all `ac.const[int]` parameters with
