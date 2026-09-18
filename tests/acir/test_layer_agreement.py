@@ -25,10 +25,17 @@ import re
 
 import pytest
 
-from wse_model.acir.model.top import acir_top
-from wse_model.calendar.route_bits import BitPair, RouteBits
-from wse_model.fixtures import ffn_example, golden_route_bits
-from wse_model.topology import CALENDAR_BASELINE, WHITEPAPER_HARDWARE
+# Importing the entry pulls in the frontend, so gate the collection on it: in CI
+# the frontend is absent (it is not published on PyPI) and this file must skip
+# rather than error during collection.
+pytest.importorskip(
+    "agentic_circuit",
+    reason="the agentic_circuit frontend is not installed (not published on PyPI)",
+)
+from wse_model.acir.model.top import acir_top  # noqa: E402
+from wse_model.calendar.route_bits import BitPair, RouteBits  # noqa: E402
+from wse_model.fixtures import ffn_example, golden_route_bits  # noqa: E402
+from wse_model.topology import CALENDAR_BASELINE, WHITEPAPER_HARDWARE  # noqa: E402
 
 pytestmark = pytest.mark.acir
 

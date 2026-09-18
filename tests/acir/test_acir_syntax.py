@@ -12,9 +12,17 @@ import re
 from pathlib import Path
 
 import pytest
-from agentic_circuit._queue_frontend import parse_queue_program
 
-from wse_model.acir.model import top as top_module
+# The gate is the frontend, not the toolchain: parsing needs no native build.
+# importorskip at module scope keeps collection clean in CI, where the frontend is
+# absent because it is not published on PyPI.
+pytest.importorskip(
+    "agentic_circuit",
+    reason="the agentic_circuit frontend is not installed (not published on PyPI)",
+)
+from agentic_circuit._queue_frontend import parse_queue_program  # noqa: E402
+
+from wse_model.acir.model import top as top_module  # noqa: E402
 
 pytestmark = pytest.mark.unit
 
