@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from wse_model.analysis import (
@@ -18,6 +20,7 @@ from wse_model.analysis import (
     two_phase_allgather_bytes,
 )
 from wse_model.analysis.bandwidth import BANDWIDTHS
+from wse_model.analysis.dcache import dcache_budget
 from wse_model.errors import OpenItemError, WseModelError
 from wse_model.open_items import OPEN_ITEMS, Resolution, open_item, require_resolved
 
@@ -178,3 +181,73 @@ def test_require_resolved_raises_for_open_items_and_passes_for_assumed_ones() ->
 def test_open_item_lookup_rejects_unknown_ids() -> None:
     with pytest.raises(KeyError):
         open_item("Q99")
+
+
+# -- D-cache budget --------------------------------------------------------
+
+
+def test_ffn_d_cache_residency_matches_the_document() -> None:
+    """Calendar §3.8.4: 2 lines key-major, 1 node-major, 128 B / 64 B."""
+    from wse_model.calendar.table import TableLayout
+
+    key_major = dcache_budget(key_count=2, node_count=40, layout=TableLayout.KEY_MAJOR)
+    node_major = dcache_budget(key_count=2, node_count=40, layout=TableLayout.NODE_MAJOR)
+    assert key_major.lines_per_core == 2
+    assert key_major.bytes_per_core == 128
+    assert node_major.lines_per_core == 1
+    assert node_major.bytes_per_core == 64
+
+
+def test_die_wide_line_count_and_refill_split() -> None:
+    """Calendar §3.8.4: 20 distinct lines, 80 requests, only 20 reach DDR."""
+    residency = dcache_budget(key_count=2, node_count=40)
+    assert residency.lines_per_key == 10
+    assert residency.lines_die_wide == 20
+    assert residency.refill_requests == 80
+    assert residency.ddr_backed_refills == 20
+    assert residency.batcher_served_refills == 60
+
+
+def test_node_major_halves_the_refill_requests_at_keycount_two() -> None:
+    """The transpose is free: same bytes, same instructions, halved requests."""
+    from wse_model.calendar.table import TableLayout
+
+    node_major = dcache_budget(key_count=2, node_count=40, layout=TableLayout.NODE_MAJOR)
+    assert node_major.refill_requests == 40
+    assert node_major.ddr_backed_refills == 20
+
+
+def test_transposed_layout_holds_four_times_more_keys_in_one_line() -> None:
+    from wse_model.calendar.table import TableLayout
+
+    key_major = dcache_budget(key_count=16, node_count=40, layout=TableLayout.KEY_MAJOR)
+    node_major = dcache_budget(key_count=16, node_count=40, layout=TableLayout.NODE_MAJOR)
+    assert key_major.lines_per_core == 16
+    assert node_major.lines_per_core == 4
+    # Both are inside the keyCount <= 16 budget, but only one stays there as
+    # keyCount grows.
+    assert key_major.within_budget()
+    assert node_major.within_budget()
+
+
+def test_amplification_is_the_entry_to_line_ratio() -> None:
+    residency = dcache_budget(key_count=2, node_count=40)
+    assert residency.amplification == 4.0
+    assert residency.spec.entries_per_line == 4
+    assert residency.spec.lines == 256
+    assert round(residency.residency_fraction * 100, 4) == 0.7812
+
+
+def test_dcache_report_is_available_from_the_cli(capsys) -> None:
+    from wse_model.cli import main
+
+    assert main(["--json", "report", "dcache"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    ffn = next(
+        entry
+        for entry in payload["entries"]
+        if entry["layout"] == "key-major" and entry["key_count"] == 2
+    )
+    assert ffn["lines_per_core"] == 2
+    assert ffn["refill_requests"] == 80
+    assert ffn["ddr_backed_refills"] == 20

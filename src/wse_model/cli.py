@@ -17,6 +17,7 @@ from wse_model import __version__
 from wse_model.analysis import (
     BANDWIDTHS,
     AicoreSpec,
+    dcache_budget,
     flit_header_cost,
     local_dram_vs_noc_ratio,
     roofline_table,
@@ -149,6 +150,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     report_sub.add_parser("overhead", parents=[common], help="flit header overhead per topology")
     report_sub.add_parser("aicore", parents=[common], help="AICORE specifications")
+    report_sub.add_parser(
+        "dcache", parents=[common], help="route-table D-cache residency and cold-miss cost"
+    )
 
     # check ---------------------------------------------------------------
     check = subparsers.add_parser("check", help="run the compiler product self-checks (F1/F2/F3)")
@@ -385,6 +389,21 @@ def _cmd_report_aicore(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_report_dcache(args: argparse.Namespace) -> int:
+    rows = []
+    for layout in TableLayout:
+        for key_count in (2, 8, 16):
+            rows.append(
+                dcache_budget(
+                    key_count=key_count,
+                    node_count=CALENDAR_BASELINE.topology.node_count,
+                    layout=layout,
+                ).describe()
+            )
+    _emit({"entries": rows}, as_json=args.json)
+    return 0
+
+
 def _cmd_check_object(args: argparse.Namespace) -> int:
     from wse_model.fixtures import clean_kernel_object
 
@@ -449,6 +468,7 @@ _HANDLERS = {
     "report.bandwidth": _cmd_report_bandwidth,
     "report.overhead": _cmd_report_overhead,
     "report.aicore": _cmd_report_aicore,
+    "report.dcache": _cmd_report_dcache,
     "check.object": _cmd_check_object,
     "open-items": _cmd_open_items,
 }

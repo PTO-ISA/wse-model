@@ -16,6 +16,7 @@ from wse_model.analysis.bandwidth import (
     local_dram_vs_noc_ratio,
     two_phase_allgather_bytes,
 )
+from wse_model.analysis.dcache import DCacheSpec, RouteTableResidency, dcache_budget
 from wse_model.analysis.latency import LatencyBlock, LatencyBudget
 from wse_model.analysis.platform import (
     AICORE_CLOCK_HZ,
@@ -49,6 +50,8 @@ __all__ = [
     "PRECISIONS",
     "AicoreSpec",
     "Bandwidth",
+    "DCacheSpec",
+    "RouteTableResidency",
     "LatencyBlock",
     "LatencyBudget",
     "PrecisionSpec",
@@ -56,6 +59,7 @@ __all__ = [
     "arithmetic_intensity_decode",
     "balance_point",
     "collective_transfer_seconds",
+    "dcache_budget",
     "flit_header_cost",
     "link_time_seconds",
     "local_dram_vs_noc_ratio",
