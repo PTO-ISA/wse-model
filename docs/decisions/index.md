@@ -89,3 +89,4 @@ gate are described in
 | [0003 Keep unresolved design items explicit](0003-keep-open-items-explicit.md) | accepted | — | `wse_model/open_items.py`, `wse_model/errors.py` |
 | [0004 Golden vectors are frozen contracts](0004-golden-vectors-are-contract.md) | accepted | — | `wse_model/fixtures.py`, `tests/golden/` |
 | [0005 Static route-table layout](0005-static-table-layout.md) | accepted | `C-9` | `wse_model/calendar/table.py` |
+| [0006 The model reports two roofline verdicts, not one](0006-two-roofline-verdicts.md) | accepted | — | `wse_model/core/cube.py`, `wse_model/analysis/roofline.py` |
