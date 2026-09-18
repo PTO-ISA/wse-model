@@ -14,6 +14,13 @@ the model checks them explicitly rather than trusting the toolchain:
   exactly ``keyCount x nodeCount x 16`` bytes, with no store ever targeting it.
 """
 
+from wse_model.compiler.package import (
+    CallSiteImmediate,
+    DeploymentPackage,
+    build_package,
+    check_opcode_domains,
+    deployment_artifacts,
+)
 from wse_model.compiler.selfcheck import (
     CALENDAR_NAMESPACE,
     KEY_REF_NAMES,
@@ -29,6 +36,11 @@ from wse_model.compiler.selfcheck import (
 
 __all__ = [
     "CALENDAR_NAMESPACE",
+    "CallSiteImmediate",
+    "DeploymentPackage",
+    "build_package",
+    "check_opcode_domains",
+    "deployment_artifacts",
     "KEY_REF_NAMES",
     "ROUTE_TABLE_SYMBOL",
     "ObjectFile",

@@ -215,6 +215,20 @@ def _build_parser() -> argparse.ArgumentParser:
         help="nodeCount the compiled product is expected to contain",
     )
 
+    check_package = check_sub.add_parser(
+        "package",
+        parents=[common],
+        help="assemble and validate the compiled deployment package",
+    )
+    check_package.add_argument(
+        "--concurrent",
+        action="store_true",
+        help=(
+            "declare the two logical identities concurrent, which the "
+            "same-opcode rule must refuse"
+        ),
+    )
+
     # open items ----------------------------------------------------------
     items = subparsers.add_parser(
         "open-items", parents=[common], help="list unresolved design items"
@@ -507,6 +521,46 @@ def _cmd_report_runtime(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_check_package(args: argparse.Namespace) -> int:
+    from wse_model.compiler import build_package
+    from wse_model.fixtures import clean_kernel_object
+
+    example = ffn_example()
+    calreg = CalRegImage(
+        slots=(
+            CalRegSlot(
+                opcode=1,
+                content=b"\x01",
+                arm_lead_cycles=64,
+                identities=("ffn:phase_b", "ffn:phase_c"),
+            ),
+        ),
+        calendar_version=1,
+    )
+    package = build_package(
+        table=example.table,
+        calreg=calreg,
+        kernel_object=clean_kernel_object(),
+        weight_shard_bytes=(2048, 2048),
+        conflict_proofs={0: "fixture:no-conflict-key0", 1: "fixture:no-conflict-key1"},
+    )
+    concurrent = (
+        {frozenset({definition.key_id for definition in example.table.ordered_keys()})}
+        if args.concurrent
+        else set()
+    )
+    report = package.validate(concurrent=concurrent)
+    payload = {
+        **package.describe(),
+        **report.describe(),
+        "concurrency_declared": sorted(
+            sorted(pair) for pair in concurrent
+        ),
+    }
+    _emit(payload, as_json=args.json, text=report.format())
+    return 0 if report.ok else 1
+
+
 def _cmd_open_items(args: argparse.Namespace) -> int:
     wanted = None if args.status == "all" else Resolution(args.status)
     items = [
@@ -552,6 +606,7 @@ _HANDLERS = {
     "report.host": _cmd_report_host,
     "report.runtime": _cmd_report_runtime,
     "check.object": _cmd_check_object,
+    "check.package": _cmd_check_package,
     "open-items": _cmd_open_items,
 }
 

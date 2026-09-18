@@ -259,11 +259,7 @@ class CalendarRouteTable:
 
         report.ran("entry-fits-gpr-pair")
         for definition in self.ordered_keys():
-            report.diagnostics.extend(
-                validate_entry_layout(
-                    self.topology.node_count, key_id=definition.key_id
-                ).diagnostics
-            )
+            report.merge(validate_entry_layout(self.topology.node_count, key_id=definition.key_id))
 
         report.ran("per-source-structural-checks")
         for definition in self.ordered_keys():
@@ -289,7 +285,7 @@ class CalendarRouteTable:
                     expected_land_count=row.land_count,
                     self_delivery=definition.self_delivery,
                 )
-                report.diagnostics.extend(sub.diagnostics)
+                report.merge(sub)
 
         report.ran("send-receive-conservation")
         for definition in self.ordered_keys():
@@ -324,13 +320,13 @@ class CalendarRouteTable:
                     key_id=definition.key_id,
                 )
 
-        report.diagnostics.extend(
+        report.merge(
             validate_table_budget(
                 key_count=self.key_count,
                 node_count=self.topology.node_count,
                 per_core_keys=self.key_count,
                 node_major=self.layout is TableLayout.NODE_MAJOR,
-            ).diagnostics
+            )
         )
         report.ran("table-budget")
         return report

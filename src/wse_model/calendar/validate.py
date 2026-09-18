@@ -33,6 +33,7 @@ records the proof's presence and refuses to claim the property itself.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -108,7 +109,28 @@ class ValidationReport:
         self.add(Diagnostic(code, Severity.WARNING, message, **location))
 
     def ran(self, check: str) -> None:
-        self.checks_run.append(check)
+        """Record that a check executed.
+
+        The list behaves as a set with insertion order: a check that runs once per
+        core would otherwise inflate it into noise, and "which checks ran" is the
+        question a caller is asking.
+        """
+        if check not in self.checks_run:
+            self.checks_run.append(check)
+
+    def merge(self, other: ValidationReport) -> None:
+        """Absorb another report's diagnostics **and** its check list.
+
+        Both halves matter: a sub-report's ``checks_run`` is how a caller can see
+        that a check actually executed, so merging only the diagnostics would make
+        a skipped check look like a passing one.
+        """
+        self.diagnostics.extend(other.diagnostics)
+        for check in other.checks_run:
+            self.ran(check)
+
+    def extend(self, diagnostics: Iterable[Diagnostic]) -> None:
+        self.diagnostics.extend(diagnostics)
 
     @property
     def errors(self) -> tuple[Diagnostic, ...]:
