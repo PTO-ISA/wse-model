@@ -211,14 +211,23 @@ route table: built-in FFN example
 OK (6 checks)
 ```
 
-The text form lists diagnostics when the table fails. `--table PATH` validates a
-table written by `calendar emit` or by the compiler; a failing table exits 1:
+The text form lists diagnostics when the table fails; a failing table exits 1.
+Optional: if you already have a compiled route-table JSON file in the
+`wse-model/calendar-route-table/1` format, validate it with `--table PATH`.
+The example below assumes `build/ffn.calendar.json` exists; the setup steps do
+not create it. Replace the path with your existing file:
 
 ```console
 $ wse-model calendar validate --table build/ffn.calendar.json
 route table: build/ffn.calendar.json
 OK (6 checks)
 ```
+
+An input file that does not exist produces a clear error on stderr and exits 2,
+with a hint to omit `--table` to validate the built-in FFN example.
+`CalendarRouteTable.to_dict()` produces the JSON representation accepted here.
+`calendar emit` produces a raw `.rodata` segment and its JSON summary, which are
+different formats from the route-table JSON accepted by `--table`.
 
 Emit the aligned `.rodata` segment under either layout:
 

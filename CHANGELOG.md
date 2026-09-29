@@ -68,6 +68,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Quick start now marks validation of an existing route-table JSON file as
+  optional. Missing `calendar validate --table` inputs produce a clear error
+  and exit 2 instead of a Python traceback.
 - **ACIR register-pair aliasing.** The `routeBits` pair for a node below 32 was
   computed as `(rbLo >> 2n) | (rbHi >> 0)`, so `rbHi[1:0]` — *node 32's* pair —
   was OR-ed into every node below 32, giving a wrong egress set and spurious

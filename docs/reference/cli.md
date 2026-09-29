@@ -156,13 +156,19 @@ JSON. Prints a text report by default and the full JSON report with `--json`.
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `--table` | built-in FFN example | path to a `wse-model/calendar-route-table/1` JSON file |
+| `--table` | built-in FFN example | path to an existing `wse-model/calendar-route-table/1` JSON file |
 
 ```console
 $ wse-model calendar validate
 route table: built-in FFN example
 OK (6 checks)
 ```
+
+`--table` is optional and reads an existing file; it does not generate one.
+A missing file reports `error: route table file not found: ...` on stderr and
+exits 2, with a hint to omit `--table` to validate the built-in FFN example.
+`CalendarRouteTable.to_dict()` produces the accepted JSON representation;
+the raw bytes and JSON summary from `calendar emit` use different formats.
 
 A failing table lists one diagnostic per error and exits 1:
 

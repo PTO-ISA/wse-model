@@ -105,9 +105,8 @@ wse-model calendar encode --key golden
 # Encode one FFN logical identity for a specific core
 wse-model calendar encode --key row-allgather --source 0
 
-# Validate the compiled route table (omit --table for the built-in FFN example)
+# Validate the built-in FFN route table
 wse-model calendar validate
-wse-model calendar validate --table build/ffn.calendar.json
 
 # Emit the aligned .rodata segment, under either layout
 wse-model calendar emit --layout node-major
@@ -128,6 +127,16 @@ wse-model check object --example
 wse-model report roofline
 wse-model report overhead
 wse-model open-items --status open
+```
+
+Optional: use the following command only when you already have a compiled
+route-table JSON file in the `wse-model/calendar-route-table/1` format. Replace
+the example path with your file's path; the setup steps above do not create
+`build/ffn.calendar.json`.
+
+```bash
+# Optional: validate an existing compiled route table
+wse-model calendar validate --table build/ffn.calendar.json
 ```
 
 Every command accepts `--json` for scripting. See

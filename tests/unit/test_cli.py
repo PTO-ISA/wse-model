@@ -122,6 +122,18 @@ def test_calendar_validate_round_trips_a_written_table(capsys, tmp_path) -> None
     assert report["key_count"] == 2
 
 
+@pytest.mark.parametrize("json_args", [(), ("--json",)])
+def test_calendar_validate_reports_a_missing_file(capsys, tmp_path, json_args) -> None:
+    table_path = tmp_path / "build" / "missing.calendar.json"
+    code, captured = _run(capsys, "calendar", "validate", "--table", str(table_path), *json_args)
+    assert code == 2
+    assert captured.out == ""
+    assert f"error: route table file not found: {table_path}" in captured.err
+    assert "omit --table to validate the built-in FFN example" in captured.err
+    assert "Traceback" not in captured.err
+    assert not table_path.exists()
+
+
 def test_calendar_validate_reports_a_corrupted_table(capsys, tmp_path) -> None:
     from wse_model.fixtures import ffn_example
 
