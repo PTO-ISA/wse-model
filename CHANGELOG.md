@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- WSE ESL system roadmap for DeepSeek-V4-Pro inference, defining the deployment
+  boundary, M0-M9 milestones and exit criteria, and acceptance plans for native
+  reductions, PG remapping, and long contexts.
 - Repository scaffolding: governance documents, packaging, lint/format
   configuration, CI, documentation skeleton, and the model package layout.
 - Design sources under `docs/design/`: the WSE system architecture whitepaper
