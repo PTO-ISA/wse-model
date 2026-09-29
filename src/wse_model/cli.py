@@ -126,7 +126,7 @@ def _build_parser() -> argparse.ArgumentParser:
     validate.add_argument(
         "--table",
         type=Path,
-        help="route table JSON; omit to validate the built-in FFN example",
+        help="existing route table JSON; omit to validate the built-in FFN example",
     )
 
     emit = calendar_sub.add_parser("emit", parents=[common], help="emit the .rodata table bytes")
@@ -331,7 +331,13 @@ def _cmd_calendar_validate(args: argparse.Namespace) -> int:
         table = ffn_example().table
         source = "built-in FFN example"
     else:
-        data = json.loads(Path(args.table).read_text(encoding="utf-8"))
+        try:
+            data = json.loads(Path(args.table).read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            raise WseModelError(
+                f"route table file not found: {args.table}. Provide an existing "
+                "route-table JSON file, or omit --table to validate the built-in FFN example"
+            ) from None
         table = CalendarRouteTable.from_dict(data)
         source = str(args.table)
     report = table.validate()
