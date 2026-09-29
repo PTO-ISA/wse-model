@@ -54,6 +54,7 @@ validation:
 nav:
   - Home: index.md
   - Roadmap: roadmap.md
+  - ESL system roadmap: design/wse-esl-deepseek-v4-pro-roadmap.md
   - Design sources:
       - System architecture whitepaper v0.1: design/wse-system-architecture-whitepaper.md
       - Calendar scheme: design/wse-calendar-scheme.md
