@@ -1,0 +1,57 @@
+{
+  "repository": "https://github.com/LinxISA/SuperScalarModel",
+  "head": "b45ceca2cf26204574a94e732fda05a329163fff",
+  "branch": "feat_pyc_model",
+  "source_kind": "working-tree snapshot; dirty, not a clean commit",
+  "review_date": "2026-11-05",
+  "files": {
+    "archSpec/superscalar_arch_as.md": {
+      "sha256": "8f88bc1a7c8b57cdc1cb98238ef4d241fd925724a2a1d2a7630d8ef5543bcd33",
+      "bytes": 169541
+    },
+    "archSpec/cube/CUBE_Architecture_Spec_v3.2.md": {
+      "sha256": "038523fc6b8876fef13dd56938657792cdf96dc29ae2bb92d2392e6cf667710b",
+      "bytes": 190258
+    },
+    "docs/model/ndf/l0/dav-adr-007.md": {
+      "sha256": "d76b7ec79ffb1b190f53e9baff6921659f51a444c0d1d6b7e3a7e2d9294ac052",
+      "bytes": 11615
+    },
+    "docs/model/ndf/l0/dav-adr-017.md": {
+      "sha256": "8ae19c2708a4014ac992156dfbd0491c9932569162c6ea54ba6bab46729174d3",
+      "bytes": 12298
+    },
+    "docs/model/ndf/l1/core/top/dav-core-top-0001.md": {
+      "sha256": "fea56d62cab55d5880558eb7253007a9b5756a4d653adb4ed6c20aa5e767962e",
+      "bytes": 4275
+    },
+    "docs/model/ndf/l1/core/top/dav-core-top-0007.md": {
+      "sha256": "01f7a29a997ff81cb7bbd4badcbee0277f67e8dbe9a95fb8facfb7e685b067e9",
+      "bytes": 3240
+    },
+    "docs/model/ndf/l1/mem/top/dav-mem-top-0001.md": {
+      "sha256": "946ce69866a81fd8352fc8cb56c909674fcb853af0e2429fe8cea2944a1aa968",
+      "bytes": 6569
+    },
+    "docs/model/ndf/l1/cube/top/dav-cube-top-0004.md": {
+      "sha256": "c5560cc3f84ee916138cd6f3e4954ba49bdc9823d44bc11f32c02a3832bbe609",
+      "bytes": 6926
+    },
+    "docs/model/ndf/l1/tmu/top/dav-tmu-top-0001.md": {
+      "sha256": "bacd5ad0d5ea2ff382105c2af73adf509953741972da61f21faae3ab70de6a12",
+      "bytes": 3844
+    },
+    "isa/ISACommon/OpcodeManager.h": {
+      "sha256": "2df821997583b2ea9acd37b8ba047167c56c0965cb61b51d2fa382afc83011b1",
+      "bytes": 22340
+    },
+    "isa/ISACommon/TileOpManager.cpp": {
+      "sha256": "d7aec0bd9cff511680be9f2655dc665371cbcadfa24aa035e03a866d6ac65a2b",
+      "bytes": 12176
+    },
+    "docs/model/ndf/l1/mem/tlsu/dav-mem-tlsu-0004.md": {
+      "sha256": "e949b9563aae2fb6d987ce8f680530d915b19a7ebda1d1cba994a7564115e471",
+      "bytes": 6826
+    }
+  }
+}

@@ -12,16 +12,23 @@
 </p>
 
 WSE is a **bandwidth-for-latency** accelerator: each AICORE owns a private
-384 MB local DRAM at 1 TB/s instead of sharing a global HBM, which turns the
-decode-stage memory-bound operators (MoE FFN, attention Q/K/V/O projection)
-into compute-bound work. With no global memory there is also no shared-memory
+384 MiB local SRAM with a 1 TB/s target instead of sharing a global HBM,
+targeting the weight-transfer cost of decode-stage operators (MoE FFN and
+attention Q/K/V/O projection). Actual compute/memory balance depends on shape
+and effective throughput. With no global memory there is also no shared-memory
 path between cores, so every split tensor must be reassembled by explicit
 collective communication over the NoC — orchestrated by **Calendar**, which
 moves both path and timeslot decisions into compile time.
 
 This repository is the executable model of that system.
 
-## What is modeled
+The [v0.2 system whitepaper](docs/design/wse-system-architecture-whitepaper.md)
+specifies SuperscalarNPU cores, local SRAM, and the proposed TLSU/Shared-memory router
+interfaces. The executable model below still follows the earlier baseline;
+[decision 0007](docs/decisions/0007-superscalarnpu-whitepaper.md) records that
+migration boundary and the remaining interface decisions.
+
+## What is modeled (earlier baseline)
 
 | Area | Model content | Source of truth |
 | --- | --- | --- |
