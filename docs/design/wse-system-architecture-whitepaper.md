@@ -6,12 +6,27 @@
 
 ## 摘要
 
-**WSE 是 SoC，SuperscalarNPU 是 WSE 内的计算核。** WSE 保留“权重驻留、激活流动”的系统定位：每核配置独立 local DRAM，以高本地带宽承接 MoE FFN 和 Attention 权重投影；跨核数据通过 Calendar 编排的 NoC 显式交换。
+**WSE 是 SoC，SuperscalarNPU 是 WSE 内的计算核。** WSE 保留“权重驻留、激活流动”的系统定位：每核配置独立 local SRAM，以高本地带宽承接 MoE FFN 和 Attention 权重投影；跨核数据通过 Calendar 编排的 NoC 显式交换。
 
 本版将核内设计改为 SuperscalarNPU 的 Block 执行、标量乱序处理、Tile 依赖管理和异构计算结构。原 WSE 数值尽量保留，但作为 **WSE 对新核的目标配置**，不作为 SuperScalarModel 已实现或已测得的能力。
 
 | 项目 | WSE 目标配置 | 适用边界 |
-|---
+|---|---|---|
+| 核频率 | 1.4 GHz | 每个 SuperscalarNPU 核的设计目标 |
+| FP16 / FP8 / FP4 峰值 | 11.5 / 45.9 / 91.8 TFLOPS/核 | 整核聚合目标，不乘内部 PE 数 |
+| Vector 吞吐 | 256 B/cycle/核 | 整核目标 |
+| local SRAM | 384 MiB、1 TB/s/核 | 本核权重与大张量的物理存储；bank、端口和访问粒度待 Q8/Q16 定稿 |
+| NoC | 64 B/link/cycle、2 GHz | 40/48 节点仍由 Q1 决定 |
+
+原容量和带宽保留为 WSE 目标，不代表已完成 SRAM 面积、功耗和时序实现。
+Local Tile/Shared Tile 是架构对象，不能与 local SRAM 的物理容量重复计数。
+
+**来源和成熟度。** 本版依据本机 SuperScalarModel 工作区改写，来源见附录 C；
+其中 draft NDF 是设计依据，不是硬件验证结果。原 Calendar 编码继续作为参考，
+旧 CCE/MTE/PIPE 绑定由本版接口提案替代。SRAM 是本版明确采用的存储介质，
+旧模型的 DRAM 命名和页粒度尚未迁移。本次不声明模型符合新白皮书或新核性能已验证。
+
+---
 
 ## 第一部分 · 系统定位
 
@@ -36,7 +51,7 @@ Attention 主体（QKᵀ / Softmax / AV）的瓶颈是 KV Cache 而不是权重�
 
 WSE 在四个维度上做了与通用架构相反的选择：
 
-1. **每核独享 local DRAM，不提供跨核隐式共享内存。** 1 TB/s × 384 MiB 直接挂在核上，取消了全局显存这一级共享瓶颈，代价是核间再也不能靠共享内存交换数据。
+1. **每核独享 local SRAM，不提供跨核隐式共享内存。** 1 TB/s × 384 MiB 直接挂在核上，取消了全局显存这一级共享瓶颈，代价是核间再也不能靠共享内存交换数据。
 2. **限定整核计算预算。** FP16 保留等效 16³ MAC/cycle 的目标，以 SuperscalarNPU 的 CUBE 组织实现；物理阵列划分和 PE 数量不由等效吞吐反推。
 3. **低精度优先。** WSE 将 FP8 / FP4 的峰值设为 FP16 的 4× / 8×目标；这需要新核单独满足。权重字节数分别降到 FP16 的 1/2 与 1/4，实际收益还受量化、布局和有效带宽影响。
 4. **确定性优于峰值。** NoC 上的集合通信走编译期规划好的 Calendar 时隙（第 11 节），用"不拥塞"换"尾时延可预测"。
@@ -62,7 +77,7 @@ flowchart LR
 | WSE-Lite #1 | MoE FFN（含专家选择后的三个投影） | 专家权重 |
 | WSE-Lite #2 | Attention 的 Q/K/V/O 投影 | 投影权重 |
 
-两台 WSE-Lite 都是**协处理器**：不持有模型控制流，不决定执行顺序，只对 主计算设备 下发的请求做固定形状的响应。权重在模型加载时就已驻留在各核 local DRAM，稳态下不再重新下发。
+两台 WSE-Lite 都是**协处理器**：不持有模型控制流，不决定执行顺序，只对 主计算设备 下发的请求做固定形状的响应。权重在模型加载时就已驻留在各核 local SRAM，稳态下不再重新下发。
 
 ### 1.4 这个划分带来的两个新问题
 
@@ -77,7 +92,7 @@ flowchart LR
 
 ## 2. 硬件架构总览
 
-WSE 硬件是四层：对外靠 UB 总线组网，对内靠 Batcher 分发，核间靠 NoC，核内靠每核自己的 local DRAM。不同核之间没有隐式共享的 payload 内存；同一核内部仍有 Shared Tile 和共享服务。
+WSE 硬件是四层：对外靠 UB 总线组网，对内靠 Batcher 分发，核间靠 NoC，核内靠每核自己的 local SRAM。不同核之间没有隐式共享的 payload 内存；同一核内部仍有 Shared Tile 和共享服务。
 
 ```mermaid
 flowchart TD
@@ -88,9 +103,9 @@ flowchart TD
   NOC --> C0[SuperscalarNPU 0]
   NOC --> C1[SuperscalarNPU 1]
   NOC --> CN[… SuperscalarNPU n]
-  C0 --> M0[local DRAM<br/>384 MiB @ 1 TB/s]
-  C1 --> M1[local DRAM]
-  CN --> MN[local DRAM]
+  C0 --> M0[local SRAM<br/>384 MiB @ 1 TB/s]
+  C1 --> M1[local SRAM]
+  CN --> MN[local SRAM]
 ```
 
 ### 2.1 四个部件的职责边界
@@ -100,7 +115,7 @@ flowchart TD
 | **UB 总线** | 机柜内与 die 间互连；接 Host CPU 与主计算设备 | 不直接触及 SuperscalarNPU |
 | **Batcher** | 外部 ↔ SuperscalarNPU 的唯一桥梁；输入数据、kernel 二进制下发；结果回写落点 | 不参与核间数据交换 |
 | **NoC** | 核间 payload 搬运与集合通信 | 不承担对外 I/O；不存储路由表 |
-| **SuperscalarNPU + local DRAM** | 计算与权重驻留 | local DRAM 不对其他核可见 |
+| **SuperscalarNPU + local SRAM** | 计算与权重驻留 | local SRAM 不对其他核可见 |
 
 两条结构性约束贯穿全文：
 
@@ -117,7 +132,7 @@ flowchart TD
 
 这三道边界解释了 Calendar 方案为什么把对齐做成硬件内部的事：核程序只能表达"我到了"，无法表达"第几拍发"，发包时机必须由 NoC 侧的 `CalReg` 决定。
 
-> **命名约定。** 本文的 UB 仅表示对外互连总线。旧核 Unified Buffer 的 384 KiB 数值保留为向量/通信工作集预算，不继续作为新核的软件地址空间名称。`local DRAM` 是核外物理存储，`Local Tile` 是新核的 Tile 状态，两者不同。
+> **命名约定。** 本文的 UB 仅表示对外互连总线。旧核 Unified Buffer 的 384 KiB 数值保留为向量/通信工作集预算，不继续作为新核的软件地址空间名称。`local SRAM` 是归属本核的物理存储，`Local Tile` 是新核的 Tile 状态，两者不同。
 
 ## 3. SuperscalarNPU 核结构与 WSE 目标配置
 
@@ -132,7 +147,7 @@ flowchart TD
 | VEC | 向量与逐元素运算 | 消费已就绪 Tile，按结果协议写回 |
 | CUBE | 矩阵运算 | 满足整核吞吐目标，使用明确的 Tile 输入输出 |
 | TMU | Tile 绑定、重命名、存储与生命周期 | 对通信源做保留，对通信目的建立独占写入与就绪协议 |
-| MEM | 标量、Tile 和索引访存；TLSU 属于 MEM | 连接 WSE 地址译码、local DRAM 和外部数据端口 |
+| MEM | 标量、Tile 和索引访存；TLSU 属于 MEM | 连接 WSE 地址译码、local SRAM 和外部数据端口 |
 | GPE | 核内 Group 协作 | 与跨核 Calendar 域分开，不直接充当 NoC 集合通信 |
 
 上述是职责划分，不要求各域各有一份独立物理副本。SPE 的内层 ROB 管理标量顺序，BROB 管理 Block 顺序；不能再用“所有工作共用一个统一 ROB”的早期框图替代当前合同。
@@ -158,11 +173,13 @@ Vector 保留整核 256 B/cycle 的目标；输出转换/写回路径也以原 2
 | L0C 256 KiB | 矩阵累加与结果暂存 | 累加状态和结果 Tile 的交接 |
 | L1 1 MiB | 通用片上 Tile backing 预算 | Local/Shared 分区、分配和回收 |
 | Unified Buffer 384 KiB | 向量/通信工作集预算 | arena、向量中间结果、双缓冲配额 |
-| local DRAM 384 MiB | 每核权重与大张量 | 1 TB/s、2 KiB page 的 WSE 端口 |
+| local SRAM 384 MiB | 每核权重与大张量 | 1 TB/s 的 WSE 目标端口；bank、读写端口与访问粒度待定 |
 
 本版容量统一使用二进制单位：1 KiB=1024 B，1 MiB=1024² B；这是现有 WSE 模型 `analysis/platform.py` 对旧 KB/MB 数值的解释。带宽 GB/s、TB/s 使用十进制单位。
 
-前五项作为互不重叠的容量预算保留，总计 **2304 KiB（2.25 MiB）/核**。它们不等于已经确定的五块新核 SRAM。Local/Shared 是 Tile 作用域与访问契约，不是额外叠加的两份容量；同一 Tile 必须只计入一个 backing pool。缓存、队列、重命名表和控制存储未由此表覆盖，需单独预算。
+SRAM 不采用旧 DRAM 的行激活/物理页假设。2 KiB 若继续作为软件搬运块，必须在 Q8 中单独确定，不应被称为 SRAM 最小读写单位。384 MiB 的容量与 1 TB/s 的带宽均为待物理实现验证的目标。
+
+前五项作为互不重叠的容量预算保留，总计 **2304 KiB（2.25 MiB）/核**。它们不等于已经确定的五块新核 SRAM。Local/Shared 是 Tile 作用域与访问契约，不是额外叠加的两份容量；同一 Tile 必须只计入一个 backing pool。384 MiB local SRAM 与上述 2.25 MiB 执行暂存预算分开计算，尚未合并物理存储池。缓存、队列、重命名表和控制存储未由此表覆盖，需单独预算。
 
 ### 3.4 Tile 状态和通信生命周期
 
@@ -176,19 +193,19 @@ Local Tile 的相对 hand、代际、大小与物理 Cell 地址分开管理，S
 
 ### 4.1 三种含义不能混用
 
-`GM` 是 ISA 的普通内存访问域；local DRAM 是 WSE 的物理存储；Local/Shared Tile 是核内数据对象。采用 SuperscalarNPU 不意味着自动恢复跨核全局 HBM，也不意味着删除新核所有 GM 访存指令。
+`GM` 是 ISA 的普通内存访问域；local SRAM 是 WSE 的物理存储；Local/Shared Tile 是核内数据对象。采用 SuperscalarNPU 不意味着自动恢复跨核全局 HBM，也不意味着删除新核所有 GM 访存指令。
 
-本版提出 WSE 目标地址映射：本核权重/张量地址映射到本核 local DRAM，代码和常量映射到 Batcher 后的程序镜像，跨核 payload 仍经显式 Calendar 操作。具体虚拟地址布局、保护、缓存属性和故障编码列入 Q13。SSM 当前 NDF 中统一 GM、PTO-TSO 和多核一致性假设不能直接套在 WSE 上；局部映射必须在目标 ISA/profile 中明确，不能由模型静默改写内存语义。
+本版提出 WSE 目标地址映射：本核权重/张量地址映射到本核 local SRAM，代码和常量映射到 Batcher 后的程序镜像，跨核 payload 仍经显式 Calendar 操作。具体虚拟地址布局、保护、缓存属性和故障编码列入 Q13。SSM 当前 NDF 中统一 GM、PTO-TSO 和多核一致性假设不能直接套在 WSE 上；局部映射必须在目标 ISA/profile 中明确，不能由模型静默改写内存语义。
 
 ### 4.2 代码、常量与 payload 的通路
 
 ```mermaid
 flowchart LR
-  DDR[程序镜像 DDR] --> BM[Batcher.mem]
+  IMAGE[程序镜像存储] --> BM[Batcher.mem]
   BM --> IC[指令缓存及取指接口]
   BM --> DC[标量常量缓存路径]
   DC --> GPR[SPE 标量操作数]
-  DRAM[本核 local DRAM] <--> MEM[MEM / TLSU]
+  SRAM[本核 local SRAM] <--> MEM[MEM / TLSU]
   MEM <--> TILE[Local / Shared 数据服务]
   TILE <--> EU[VEC / CUBE]
   MEM -->|TX 描述符与源数据| ADP[WSE router 核端接口与 CDC]
@@ -217,12 +234,12 @@ Calendar 静态表继续放入只读程序镜像，通过标量 load 取得。�
 
 | 通路 | WSE 目标 | 归属 |
 |---|---|---|
-| local DRAM | 1 TB/s/核 | 新核所有内部 PE 共享整核预算 |
+| local SRAM | 1 TB/s/核 | 新核所有内部 PE 共享整核预算 |
 | NoC 单链路 | 128 GB/s/方向 | 64 B × 2 GHz，未扣头部和空隙 |
 | UB 总线组网 | 224 GB/s | 8 × 224 Gbps |
 | UB 总线 Host 方向 | 14 GB/s | 1 × 112 Gbps |
 
-1 TB/s ÷ 224 GB/s ≈ 4.46 是保留权重驻留策略的带宽动机；它不是整个 SoC 的吞吐倍数。MEM/TLSU 到 local DRAM 的实际有效带宽需扣除 page、bank、排队和共享端口损耗。
+1 TB/s ÷ 224 GB/s ≈ 4.46 是保留权重驻留策略的带宽动机；它不是整个 SoC 的吞吐倍数。MEM/TLSU 到 local SRAM 的实际有效带宽需扣除 bank 冲突、排队和共享端口损耗。
 
 ### 4.5 TLSU、Shared memory 与 router 的接口合同
 
@@ -321,11 +338,11 @@ Batcher 坐在 Host/主计算设备 与 SuperscalarNPU 阵列之间，是**外�
 | 职责 | 方向 | 频度 |
 |---|---|---|
 | 算子 kernel 二进制下发（`.text` + `.rodata` 同批） | 入 | 每 kernel 一次 |
-| 权重下发到各核 local DRAM | 入 | 模型加载一次 |
+| 权重下发到各核 local SRAM | 入 | 模型加载一次 |
 | 输入激活分发给各 SuperscalarNPU | 入 | 每次推理 |
 | 各核计算结果汇收回写 | 出 | 每次推理 |
 
-**Batcher.mem 是一个双重角色的部件**：它既是数据面的暂存（输入分发、结果汇收），也是控制面的中转（每核 I-Cache / D-Cache 的 miss 回填都经它从 DDR 取）。后一个角色很容易被忽略，却直接决定了冷启动的代价：多核同时冷 miss 时，Batcher.mem 是共享的，代价不按核数线性展开。
+**Batcher.mem 是一个双重角色的部件**：它既是数据面的暂存（输入分发、结果汇收），也是控制面的中转（每核 I-Cache / D-Cache 的 miss 回填都经它从程序镜像存储取）。后一个角色很容易被忽略，却直接决定了冷启动的代价：多核同时冷 miss 时，Batcher.mem 是共享的，代价不按核数线性展开。
 
 ### 6.2 分发模型对时延的意义
 
@@ -355,7 +372,7 @@ sequenceDiagram
 
 两条观察：
 
-- **组网带宽（224 GB/s）远小于单核 local DRAM（1 TB/s）。** 器件间只能传激活，不能传权重——权重必须驻留。这是三分离部署可行的前提。
+- **组网带宽（224 GB/s）远小于单核 local SRAM（1 TB/s）。** 器件间只能传激活，不能传权重——权重必须驻留。这是三分离部署可行的前提。
 - **Host 通道（14 GB/s）是控制面尺度。** 它只能跑命令与小量元数据，不在推理关键路径上。
 
 ---
@@ -579,7 +596,7 @@ epoch 在接收登记和发送描述符中一致绑定，登记后到本轮收�
 
 | | 占用 | 量级（`keyCount`=2、40 节点） |
 |---|---|---|
-| DDR | `keyCount × 节点数 × 16 B` | 1 280 B，**die 级一份** |
+| 程序镜像存储 | `keyCount × 节点数 × 16 B` | 1 280 B，**die 级一份** |
 | 单个节点通信 owner 的标量缓存工作集 | `keyCount` 条目标 64 B 行 | **128 B**，私有缓存副本另计 |
 
 并且 D-Cache 占用可以再降四倍：把表转置成 node-major 后，本核的 `keyCount` 个表项连续，占 `⌈keyCount/4⌉` 条行。指令数、寻址形态、表总字节数全不变（待决项 C-9）。
@@ -590,7 +607,7 @@ Runtime 负责把编译产物变成芯片上的状态，并在每次推理时驱
 
 | 档位 | 做什么 | 频度 |
 |---|---|---|
-| **装载期** | kernel 二进制下发；权重写入各核 local DRAM；`CalReg` 全域镜像原子写入；三版本号校验 | 模型加载一次 |
+| **装载期** | kernel 二进制下发；权重写入各核 local SRAM；`CalReg` 全域镜像原子写入；三版本号校验 | 模型加载一次 |
 | **每次 launch** | task descriptor；args buffer（含 `blockId`）；输入张量；相边界 barrier | 每算子一次 |
 | **运行期** | 不插手 | — |
 
@@ -598,12 +615,12 @@ Runtime 负责把编译产物变成芯片上的状态，并在每次推理时驱
 
 | 下发物 | 经过 | 落到哪一级 | 频度 |
 |---|---|---|---|
-| kernel 二进制（`.text`+`.rodata`） | Batcher | DDR 代码段/数据段，**miss 时经 Batcher.mem 到 I$/D$** | 每 kernel 一次 |
-| 模型权重 | Batcher | **各核 local DRAM** | 模型加载一次 |
+| kernel 二进制（`.text`+`.rodata`） | Batcher | 程序镜像代码段/数据段，**miss 时经 Batcher.mem 到 I$/D$** | 每 kernel 一次 |
+| 模型权重 | Batcher | **各核 local SRAM** | 模型加载一次 |
 | `CalReg` 时隙表 | 不经 Batcher.mem | **NoC 节点寄存器** | 一次性 |
 | 输入激活 | Batcher | 各核通信/激活 backing | 每次推理 |
 
-这张表是本系统最容易记错的一张。三个常见误解："路由表占 Tile backing"（不占，走标量常量路径）、"指令要过 local DRAM"（不过）、"时隙表每轮下发"（不是，一次性）。
+这张表是本系统最容易记错的一张。三个常见误解："路由表占 Tile backing"（不占，走标量常量路径）、"指令要过 local SRAM"（不过）、"时隙表每轮下发"（不是，一次性）。
 
 ### 12.2 冷启动与稳态
 
@@ -668,11 +685,11 @@ flowchart TD
 
 | 产物 | 形式 | 去向 |
 |---|---|---|
-| kernel 机器码 | `.text` | DDR 代码段 |
-| `routeBits` 静态表 | `.rodata`，64 B 对齐 | DDR 数据段 |
+| kernel 机器码 | `.text` | 程序镜像代码段 |
+| `routeBits` 静态表 | `.rodata`，64 B 对齐 | 程序镜像数据段 |
 | `CalReg` 全域镜像 | 独立二进制段 | NoC 节点寄存器 |
 | 三版本号 + ISA/profile/Calendar ABI 标识 | 元数据（新增格式待定） | 装载期校验 |
-| 模型权重 | 按核切好的分片 | 各核 local DRAM |
+| 模型权重 | 按核切好的分片 | 各核 local SRAM |
 
 ## 14. 加载期：三条下发链路
 
@@ -683,9 +700,9 @@ flowchart LR
   PKG[部署包] --> R1[kernel 二进制]
   PKG --> R2[模型权重]
   PKG --> R3[CalReg 镜像]
-  R1 -->|Batcher| DDR[DDR 代码段+数据段]
-  DDR -.运行期 miss.-> BM[Batcher.mem] -.-> IC[I$ / D$]
-  R2 -->|Batcher| LD[各核 local DRAM]
+  R1 -->|Batcher| IMAGE[程序镜像代码段+数据段]
+  IMAGE -.运行期 miss.-> BM[Batcher.mem] -.-> IC[I$ / D$]
+  R2 -->|Batcher| LD[各核 local SRAM]
   R3 -->|停机窗口原子写| REG[NoC 节点 CalReg]
 ```
 
@@ -694,10 +711,10 @@ flowchart LR
 | | kernel 二进制 | 模型权重 | `CalReg` |
 |---|---|---|---|
 | 经 Batcher | 是 | 是 | **否**（直达 NoC 节点） |
-| 终点 | DDR，运行期回填 I$/D$ | 各核 local DRAM | NoC 节点寄存器 |
-| 经 local DRAM | **否** | — | 否 |
-| 占 Tile backing | **否** | 装载到 local DRAM，执行时再取入 Tile | 否 |
-| 写入要求 | 无特殊要求 | 按 2 KiB page 对齐 | **停机窗口内原子写，不得有流量在飞** |
+| 终点 | 程序镜像存储，运行期回填 I$/D$ | 各核 local SRAM | NoC 节点寄存器 |
+| 经 local SRAM | **否** | — | 否 |
+| 占 Tile backing | **否** | 装载到 local SRAM，执行时再取入 Tile | 否 |
+| 写入要求 | 无特殊要求 | 按待定义 SRAM 事务/传输块对齐；不沿用 DRAM 物理页要求 | **停机窗口内原子写，不得有流量在飞** |
 
 第三列的特殊性值得强调：`CalReg` 是唯一**不经 Batcher** 的下发物，因为它的目的地是 NoC 而不是 SuperscalarNPU。
 
@@ -726,7 +743,7 @@ sequenceDiagram
   participant N as NoC
   D->>B: 输入激活 + 专家路由结果
   B->>C: 分发到各核通信/激活 backing
-  Note over C: Step0 读 local DRAM 权重 → Cube 算分片结果
+  Note over C: Step0 读 local SRAM 权重 → Cube 算分片结果
   C->>C: Step1 在 non-flush 条件下登记 Shared 接收并保留资源
   C->>C: Step2 源数据、发送描述符及 non-flush 就绪
   C->>C: Step3 全组准入并对齐
@@ -745,7 +762,7 @@ sequenceDiagram
 | 段 | 主导因素 | 怎么压 |
 |---|---|---|
 | 器件间往返 | UB 总线 + Batcher 分发 | 加大算子粒度，减少往返次数 |
-| 核内计算 | 有效计算吞吐、Tile 供数与 local DRAM 带宽 | 形状利用率、精度与 2 KiB 页布局 |
+| 核内计算 | 有效计算吞吐、Tile 供数与 local SRAM 带宽 | 形状利用率、精度与 SRAM bank/传输块布局 |
 | 核间通信 | NoC 链路 + 对齐开销 | Calendar 错峰；切分选通信量小的轴 |
 | 尾部同步 | 最慢核 | 负载均衡；避免专家倾斜 |
 
@@ -823,7 +840,7 @@ fabric 若不支持 self-delivery，本核那一段由合法 Tile 搬运或 back
 
 ### 17.1 为什么切 N 轴
 
-切分轴的选择直接决定通信量，而第 4.4 节已经说明 NoC 单链路（128 GB/s）比 local DRAM（1 TB/s）窄一个量级：
+切分轴的选择直接决定通信量，而第 4.4 节已经说明 NoC 单链路（128 GB/s）比 local SRAM（1 TB/s）窄一个量级：
 
 | 切法 | 每核持有 | 需要的通信 | 通信量 |
 |---|---|---|---|
@@ -848,7 +865,7 @@ flowchart LR
 
 ### 17.3 容量约束
 
-单核 local DRAM 384 MiB 是硬上限。以 FP8 权重估算，单个专家的三个矩阵共 `3 × H × I` 字节；根据 `H`、`I` 与专家数，可以直接算出一个核能驻留几个专家、需要几个核才能装下整层。具体模型尺寸尚未提供（附录 Q5），因此本节不给具体数字。
+单核 local SRAM 384 MiB 是硬上限。以 FP8 权重估算，单个专家的三个矩阵共 `3 × H × I` 字节；根据 `H`、`I` 与专家数，可以直接算出一个核能驻留几个专家、需要几个核才能装下整层。具体模型尺寸尚未提供（附录 Q5），因此本节不给具体数字。
 
 ### 17.4 一个真正的难点：负载倾斜
 
@@ -921,7 +938,7 @@ O 投影则相反：它的输入是所有 head 拼接后的结果，天然是沿
 |---|---|---|
 | 器件间传输 | UB 总线 224 GB/s | 只能靠增大粒度摊薄 |
 | Batcher 分发/汇收 | Batcher.mem + 异步边界 | 流水化可部分隐藏 |
-| 核内计算 | CUBE/VEC 有效吞吐、local DRAM 及 Tile 供数 | 精度、形状利用率和流水重叠 |
+| 核内计算 | CUBE/VEC 有效吞吐、local SRAM 及 Tile 供数 | 精度、形状利用率和流水重叠 |
 | 核间通信 | NoC 128 GB/s/链路 + 对齐 | 切分选择；Calendar 错峰 |
 | 尾部同步 | 最慢核 | 负载均衡 |
 
@@ -978,7 +995,7 @@ HW-7 的计数若采用整数形式，表示 0..48 至少需要 6 bit；也可�
 | **Q1** | **NoC 节点数到底是 40 还是 48？** 需求给的是 6×8 mesh，现有 Calendar 设计文档按 40 节点（5×8）写就，`routeBits` 的 80 bit 宽度直接来自这个数。是 48 个节点中 40 个挂 SuperscalarNPU（其余 8 个是 I/O / Batcher 节点），还是文档需更新为 96 bit？ | 5、11、17 |
 | **Q2** | **一个 WSE-Lite 到底有几个 Reticle / 几个 die？** 全文按单 Reticle 写；若多 Reticle，需要知道：跨 Reticle 是否仍是 mesh、带宽多少、是否同步（现有表述只说"Reticle 内同步"） | 2、5、17 |
 | **Q3** | **Batcher 的具体规格**：Batcher.mem 容量与带宽；对 SuperscalarNPU 侧的聚合带宽；一个 Batcher 服务多少核；是否支持多个并行分发通道 | 6、14、19 |
-| **Q4** | **DDR 在架构中的位置**。文档反复出现 "DDR → Batcher.mem → I$/D$"，但需求侧只描述了 local DRAM。这个 DDR 是独立于 local DRAM 的片外存储，还是就是 local DRAM 的另一种叫法？容量与带宽、与新核地址映射的关系？ | 4、14 |
+| **Q4** | **程序镜像后备存储的位置和介质**。代码/常量经程序镜像存储 → Batcher.mem → I$/D$，其容量、带宽和物理位置尚未确定；不得把原文 DDR 自动等同于每核 local SRAM，也不隐含恢复跨核共享 payload 内存。 | 4、14 |
 | **Q5** | **目标模型尺寸**：DeepSeek-V4 Pro 的 `H` / `I` / 专家数 / top-k / head 数 / 权重精度。没有这些就无法给出具体切分方案与时延数字 | 17、18、19 |
 | **Q6** | **MoE 负载倾斜的处理策略**。不变式 E1 要求成员核不得条件跳过集合，但 MoE 路由是运行期决定的。是采用固定容量（capacity factor）+ 发零，还是其他机制？ | 17 |
 
@@ -987,7 +1004,7 @@ HW-7 的计数若采用整数形式，表示 0..48 至少需要 6 bit；也可�
 | # | 问题 | 影响章节 |
 |---|---|---|
 | **Q7** | **Shared 接收 arena 的对象分段和容量预算如何确定？** 基线增加 Shared memory router 写端口；仍需确定每对象范围、TMU 发布和双缓冲配额，可选内存窗口另定 | 16、3 |
-| **Q8** | **权重在 local DRAM 中的存储布局与预取机制**。需确定 MEM/TLSU 到 Local/Shared backing 和 CUBE B 供数的路径；2 KiB page 如何配合 512 KiB 权重预算？ | 3、4、15 |
+| **Q8** | **权重在 local SRAM 中的存储布局与预取机制**。需确定 MEM/TLSU 到 Local/Shared backing 和 CUBE B 供数的路径；SRAM 的 bank/读写端口、最小访问粒度和传输块如何配合 512 KiB 权重预算？旧 2 KiB DRAM 页不是新存储的固有要求。 | 3、4、15 |
 | **Q9** | **主计算设备 ↔ WSE-Lite 的接口形态**：是内存语义（写对端窗口）还是消息语义？同步还是异步？一次往返的基础时延量级？ | 1、6、18 |
 | **Q10** | **两台 WSE-Lite 的硬件是否完全相同？** 还是按算子特点做了差异化配置（如不同核数 / 容量）？ | 1 |
 | **Q11** | **权重精度的实际选型**。FP8 与 FP4 在目标模型上的精度可接受性已验证吗？是否需要混合精度（如激活 FP16 + 权重 FP8）？ | 19、3 |
@@ -997,7 +1014,7 @@ HW-7 的计数若采用整数形式，表示 0..48 至少需要 6 bit；也可�
 
 | # | 问题 | 影响章节 |
 |---|---|---|
-| **Q13** | WSE 地址映射、缓存属性、保护和内存序 profile：如何在每核 local DRAM 下约束新核 GM 访问；是否以及在哪些范围提供一致性 | 3、4、9、14 |
+| **Q13** | WSE 地址映射、缓存属性、保护和内存序 profile：如何在每核 local SRAM 下约束新核 GM 访问；是否以及在哪些范围提供一致性 | 3、4、9、14 |
 | **Q14** | Calendar 指令/ABI、TLSU 与 Shared 的 router 通道编码/宽度/深度、有界端口服务、非投机资格、节点 owner、故障和全片排空细化 | 8、9、11、16 |
 | **Q15** | 各 Thread 的启动入口、栈、参与掩码、程序可见性维护和每节点通信 owner 的启动 ABI | 12、14 |
 | **Q16** | 整核 PE 数、CUBE 分片与低精度实现、Vector/写回吞吐、各存储预算的物理映射和缓存/控制额外面积 | 3、19 |
@@ -1011,7 +1028,7 @@ HW-7 的计数若采用整数形式，表示 0..48 至少需要 6 bit；也可�
 以下假设已写进正文，若不成立需回改：
 
 1. 单 Reticle；40 节点 Calendar 编码与 48 节点物理候选同时保留，Q1/Q2 未解决前不混用表布局
-2. 权重在模型加载时一次性驻留 local DRAM，稳态不重新下发
+2. 权重在模型加载时一次性驻留 local SRAM，稳态不重新下发
 3. 每层 3 次器件间往返（Q/K/V 投影、1 次；O 投影、1 次；FFN、1 次）
 4. CUBE 数值为整核等效 MAC/cycle 的 WSE 目标，每 MAC 计 2 FLOP；不规定物理阵列形状
 5. 核内多 PE 分享整核吞吐与存储预算，不能乘 PE 数重复计算
@@ -1027,10 +1044,10 @@ HW-7 的计数若采用整数形式，表示 0..48 至少需要 6 bit；也可�
 | SPE / BROB / ROB | 标量处理域 / 外层 Block 顺序管理 / 内层标量顺序管理 |
 | TMU | Tile 绑定、重命名、就绪、存储与生命周期管理域 |
 | MEM / TLSU | 统一访存域 / 其下的标量、Tile 和索引访存单元 |
-| Local / Shared Tile | 核内 Tile 作用域和绑定契约，不等于 local DRAM 或跨核共享内存 |
+| Local / Shared Tile | 核内 Tile 作用域和绑定契约，不等于 local SRAM 或跨核共享内存 |
 | Batcher | 主计算设备与 WSE 核阵列之间的外部桥梁 |
 | UB 总线 | 对外组网互连，9 lane |
-| local DRAM | 每核独享的物理权重/张量存储，384 MiB @1 TB/s 目标 |
+| local SRAM | 每核独享的物理权重/张量存储，384 MiB @1 TB/s 目标 |
 | Calendar / CalReg | 跨核路由和时隙编排 / NoC 节点常驻时隙配置 |
 | routeBits / opcode | 2×节点数 bit 的路径位图 / 3 bit 时隙索引；后者不是处理器指令 opcode |
 | expVal | 本轮期望接收的有效提交 payload 字节数 |

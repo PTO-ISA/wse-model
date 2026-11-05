@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Specify local SRAM for per-core weight/tensor storage, retaining 384 MiB and
+  1 TB/s as targets. Retire the DRAM physical-page assumption from the v0.2
+  design; keep SRAM access granularity and program-image backing explicit.
+
 - Revise the WSE system whitepaper to v0.2 with SuperscalarNPU cores, retaining
   the previous aggregate compute and storage numbers as WSE target budgets.
 - Define the proposed TLSU-to-router send interface and Shared-memory router

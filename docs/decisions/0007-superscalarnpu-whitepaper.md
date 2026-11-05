@@ -14,15 +14,22 @@
 
 1. 核内职责改为 SMT、SPE、VEC、CUBE、TMU、MEM、GPE；TLSU 属于 MEM。
 2. 保留 1.4 GHz、FP16/8/4 聚合吞吐、256 B/cycle 向量目标、五项存储预算和
-   每核 local DRAM 配置。目标不等于 SSM 默认配置或已测性能，不乘内部 PE 数。
+   每核 local SRAM 配置。目标不等于 SSM 默认配置或已测性能，不乘内部 PE 数。
 3. 旧 L0/L1/UB 容量保留为预算用途，不把它们强行对应 Local/Shared Tile。
 4. 跨核通信保留 Calendar 的路由、时隙与字节守恒结构；旧 MTE/CCE/PIPE 绑定
    由显式标为提案的发送、接收登记、排空和完成语义替代。具体机器编码未定义。
-5. WSE 私有 local DRAM 与 SSM 统一 GM/一致性合同的差异必须形成目标 profile，
+5. WSE 私有 local SRAM 与 SSM 统一 GM/一致性合同的差异必须形成目标 profile，
    不能默认兼容。新增 Q13–Q16 记录内存、通信、启动和核资源的待定项。
 6. MEM.TLSU 增加 router 发送/控制接口，Shared memory owner 增加 router 接收写端口；
    TMU 保持代际和发布所有权。先登记并预留资源再对齐；信用流控不能替代时隙服务证明。
 7. 外部协同角色泛称“主计算设备”；没有据此选择外部设备的新硬件实现。
+
+## SRAM correction
+
+每核权重和大张量存储明确改为 local SRAM，保留 384 MiB、1 TB/s 目标。
+旧 DRAM 2 KiB 物理页不再作为新存储约束；bank、端口、访问粒度和软件搬运块
+由 Q8/Q16 定义。容量和带宽未构成 SRAM 面积/功耗验证。程序镜像后备存储单独
+保留为 Q4 未决项。现有模型的 LocalDram 和页规则继续属于旧实现，不在本 PR 改码。
 
 ## Consequences
 
