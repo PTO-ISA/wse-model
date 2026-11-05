@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Revise the WSE system whitepaper to v0.2 with SuperscalarNPU cores, retaining
+  the previous aggregate compute and storage numbers as WSE target budgets.
+- Define the proposed TLSU-to-router send interface and Shared-memory router
+  write interface, including pre-alignment resource admission, write-confirmed
+  receive accounting, TMU publication, and distinct local/global drain rules.
+  This is a design revision; the executable model and golden vectors remain
+  on their existing baseline. Calendar machine encodings remain open.
+
 ### Added
 
 - Repository scaffolding: governance documents, packaging, lint/format

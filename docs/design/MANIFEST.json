@@ -10,10 +10,10 @@
     },
     "wse-system-architecture-whitepaper.md": {
       "title": "WSE 系统架构设计白皮书",
-      "version": "v0.1",
-      "date": "2026-09-17",
-      "bytes": 53912,
-      "sha256": "1e09cad95fc198030815205bc36da484c78550d16ba79aa910190c4401622d7a"
+      "version": "v0.2",
+      "date": "2026-11-05",
+      "bytes": 68920,
+      "sha256": "8922ae2af06983015b67e35410edda0b0ef9ce53448f601dc9b48e95302a7792"
     }
   }
 }

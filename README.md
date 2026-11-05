@@ -21,6 +21,12 @@ moves both path and timeslot decisions into compile time.
 
 This repository is the executable model of that system.
 
+The [v0.2 system whitepaper](docs/design/wse-system-architecture-whitepaper.md)
+specifies SuperscalarNPU cores and the proposed TLSU/Shared-memory router
+interfaces. The executable model below still follows the earlier baseline;
+[decision 0007](docs/decisions/0007-superscalarnpu-whitepaper.md) records that
+migration boundary and the remaining interface decisions.
+
 ## What is modeled
 
 | Area | Model content | Source of truth |

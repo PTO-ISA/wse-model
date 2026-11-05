@@ -90,3 +90,4 @@ gate are described in
 | [0004 Golden vectors are frozen contracts](0004-golden-vectors-are-contract.md) | accepted | — | `wse_model/fixtures.py`, `tests/golden/` |
 | [0005 Static route-table layout](0005-static-table-layout.md) | accepted | `C-9` | `wse_model/calendar/table.py` |
 | [0006 The model reports two roofline verdicts, not one](0006-two-roofline-verdicts.md) | accepted | — | `wse_model/core/cube.py`, `wse_model/analysis/roofline.py` |
+| [0007 WSE 白皮书采用 SuperscalarNPU 核](0007-superscalarnpu-whitepaper.md) | accepted（白皮书方向；接口提案） | Q13–Q16 保持待定 | 白皮书 v0.2；模型未迁移 |

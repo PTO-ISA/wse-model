@@ -1,47 +1,34 @@
 # WSE 系统架构设计白皮书
 
-*软硬件一体系统设计文档 · 版本 v0.1（草案）*
+*软硬件一体系统设计文档 · 版本 v0.2（SuperscalarNPU 核适配草案）*
 
-2026-09-17
+2026-11-05
 
 ## 摘要
 
-WSE 是一款**用带宽换时延**的加速器：单核算力低于 Davinci，但每核独享 1 TB/s 的 local DRAM，把大模型解码阶段的搬运-bound 算子从「等权重」变成「算权重」。它以 WSE-Lite 形态作为 Davinci 的协处理器，承接 MoE FFN 与 Attention 权重投影两类算子。
+**WSE 是 SoC，SuperscalarNPU 是 WSE 内的计算核。** WSE 保留“权重驻留、激活流动”的系统定位：每核配置独立 local DRAM，以高本地带宽承接 MoE FFN 和 Attention 权重投影；跨核数据通过 Calendar 编排的 NoC 显式交换。
 
-单核的平衡点可以从规格直接算出，这是整个方案的出发点：
+本版将核内设计改为 SuperscalarNPU 的 Block 执行、标量乱序处理、Tile 依赖管理和异构计算结构。原 WSE 数值尽量保留，但作为 **WSE 对新核的目标配置**，不作为 SuperScalarModel 已实现或已测得的能力。
 
-| 量 | 取值 | 由什么推出 |
-|---|---|---|
-| Cube FP16 算力 | 11.5 TFLOPS/核 | 16×16×16 MAC/cycle × 2 FLOP × 1.4 GHz |
-| Cube FP8 / FP4 | 45.9 / 91.8 TFLOPS/核 | 16×32×32、16×64×32，比例 1:4:8 |
-| local DRAM 带宽 | 1 TB/s/核 | 规格给定 |
-| **计算强度平衡点** | **11.5 FLOP/Byte（FP16）**、45.9（FP8） | 算力 ÷ 带宽 |
-| 解码 GEMV 的实际强度 | ≈ 2×batch FLOP/Byte | 每个权重字节被用一次 |
-
-平衡点除以 2 就是**不再搬运-bound 所需的最小 batch**：FP16 下约 6，FP8 下约 23。Davinci 的同一比值要大一个量级，这正是它在解码阶段跑不满的原因。
-
-**本文的边界。** 结构上先立系统（第一、二、三部分：定位、硬件、软件栈），再串流程（第四部分：编译期 → 加载期 → 运行期，从用户写的 Python 算子一路到 NoC 上的 flit），最后落到业务算子（第五部分）。
-
-**信息来源。** 硬件规格、部署形态、业务场景来自需求方给定；Calendar 通信方案、`.rodata`/D-Cache 下发链路、PTO/CCE 接口面来自本仓库既有设计文档；PyPTO 与 PTO-ISA 的公开部分来自开源仓库。三者之外的内容一律记入附录的待确认清单，**不做补写**。
-
----
+| 项目 | WSE 目标配置 | 适用边界 |
+|---
 
 ## 第一部分 · 系统定位
 
 ## 1. 设计动机与系统定位
 
-WSE 不是一个更快的 Davinci，而是把 Davinci 跑不满的那一半工作拿走的专用件。
+WSE 面向权重访问密集的协处理任务。主计算设备保留模型级调度，SuperscalarNPU 核负责 WSE 内部的程序执行。
 
 ### 1.1 解码阶段为什么是搬运-bound
 
-预填阶段的 GEMM 每个权重字节被复用 seqLen 次，计算强度轻松过百；解码阶段退化成 GEMV，每个权重字节只被乘一次，计算强度 ≈ 2×batch FLOP/Byte。当 batch 远小于硬件平衡点时，Cube 绝大部分时间在等权重到达。
+预填阶段的 GEMM 每个权重字节被复用 seqLen 次，计算强度轻松过百；解码阶段退化成 GEMV，每个权重字节只被乘一次，理想权重计算强度为 `2×batch / 每元素字节数` FLOP/Byte。当计算强度低于有效算力/带宽平衡点时，权重搬运可能成为主导；小形状也可能先受阵列利用率限制。
 
 两类算子受影响最重，它们就是 WSE 的目标：
 
 | 算子 | 为什么搬运-bound | 交给 WSE 的部分 |
 |---|---|---|
 | **MoE FFN** | 每 token 只激活少数专家，但整个专家的权重矩阵都要读进来；有效 batch 被路由打散到接近 1 | 整个 FFN（up / gate / down 投影） |
-| **Attention 权重投影** | Q/K/V 前投影与 O 后投影是纯权重 GEMV，与 KV 长度无关 | **仅前后投影**；Score·Softmax·AV 主体留在 Davinci |
+| **Attention 权重投影** | Q/K/V 前投影与 O 后投影是纯权重 GEMV，与 KV 长度无关 | **仅前后投影**；Score·Softmax·AV 主体留在主计算设备 |
 
 Attention 主体（QKᵀ / Softmax / AV）的瓶颈是 KV Cache 而不是权重，行为与权重投影完全不同，因此不在 WSE 上。这条分界是三分离部署的全部依据。
 
@@ -49,9 +36,9 @@ Attention 主体（QKᵀ / Softmax / AV）的瓶颈是 KV Cache 而不是权重�
 
 WSE 在四个维度上做了与通用架构相反的选择：
 
-1. **每核独享 local DRAM，不再有 GM。** 1 TB/s × 384 MB 直接挂在核上，取消了全局显存这一级共享瓶颈，代价是核间再也不能靠共享内存交换数据。
-2. **算力降级。** 单核 Cube 保持 16³ 形状，不加宽；省下的面积和功耗给了存储与互连。
-3. **低精度优先。** FP8 与 FP4 不仅把算力提到 4× / 8×，更关键的是把权重字节数降到 1/2 与 1/4——对搬运-bound 算子，后者才是真正的加速来源。
+1. **每核独享 local DRAM，不提供跨核隐式共享内存。** 1 TB/s × 384 MiB 直接挂在核上，取消了全局显存这一级共享瓶颈，代价是核间再也不能靠共享内存交换数据。
+2. **限定整核计算预算。** FP16 保留等效 16³ MAC/cycle 的目标，以 SuperscalarNPU 的 CUBE 组织实现；物理阵列划分和 PE 数量不由等效吞吐反推。
+3. **低精度优先。** WSE 将 FP8 / FP4 的峰值设为 FP16 的 4× / 8×目标；这需要新核单独满足。权重字节数分别降到 FP16 的 1/2 与 1/4，实际收益还受量化、布局和有效带宽影响。
 4. **确定性优于峰值。** NoC 上的集合通信走编译期规划好的 Calendar 时隙（第 11 节），用"不拥塞"换"尾时延可预测"。
 
 ### 1.3 三分离部署
@@ -60,7 +47,7 @@ WSE 在四个维度上做了与通用架构相反的选择：
 
 ```mermaid
 flowchart LR
-  H[Host CPU] --> D[Davinci<br/>计算密集部分]
+  H[Host CPU] --> D[主计算设备<br/>计算密集部分]
   D -->|Q/K/V 投影请求| W2[WSE-Lite #2<br/>Attention 权重投影]
   W2 -->|Q/K/V| D
   D -->|Attention 主体<br/>Score/Softmax/AV| D
@@ -71,18 +58,18 @@ flowchart LR
 
 | 器件 | 承担 | 主要驻留数据 |
 |---|---|---|
-| Davinci | Attention 主体、Norm、采样、调度与控制流 | KV Cache |
+| 主计算设备 | Attention 主体、Norm、采样、调度与控制流 | KV Cache |
 | WSE-Lite #1 | MoE FFN（含专家选择后的三个投影） | 专家权重 |
 | WSE-Lite #2 | Attention 的 Q/K/V/O 投影 | 投影权重 |
 
-两台 WSE-Lite 都是**协处理器**：不持有模型控制流，不决定执行顺序，只对 Davinci 下发的请求做固定形状的响应。权重在模型加载时就已驻留在各核 local DRAM，稳态下不再重新下发。
+两台 WSE-Lite 都是**协处理器**：不持有模型控制流，不决定执行顺序，只对 主计算设备 下发的请求做固定形状的响应。权重在模型加载时就已驻留在各核 local DRAM，稳态下不再重新下发。
 
 ### 1.4 这个划分带来的两个新问题
 
 三分离把内存墙换成了另外两堵墙，它们决定了后文大部分设计：
 
-- **器件间往返时延。** 每层至少两次 Davinci ↔ WSE 往返，这部分开销全落在 UB 组网与 Batcher 上（第 6 节）。
-- **核间通信取代共享内存。** 没有 GM，切分后的 tensor 只能靠 NoC 上的显式集合通信拼回来（第 16 节）。
+- **器件间往返时延。** 按第 18 节部署，每层三次主计算设备 ↔ WSE 往返，这部分开销全落在 UB 组网与 Batcher 上（第 6 节）。
+- **核间通信取代共享内存。** 没有跨核隐式共享内存，切分后的 tensor 只能靠 NoC 上的显式集合通信拼回来（第 16 节）。
 
 ---
 
@@ -90,18 +77,18 @@ flowchart LR
 
 ## 2. 硬件架构总览
 
-WSE 硬件是四层：对外靠 UB 总线组网，对内靠 Batcher 分发，核间靠 NoC，核内靠每核自己的 local DRAM。没有任何一级是全局共享的读写内存。
+WSE 硬件是四层：对外靠 UB 总线组网，对内靠 Batcher 分发，核间靠 NoC，核内靠每核自己的 local DRAM。不同核之间没有隐式共享的 payload 内存；同一核内部仍有 Shared Tile 和共享服务。
 
 ```mermaid
 flowchart TD
   HOST[机柜内 Host CPU] -->|UB 1×112 Gbps| UBN[UB 总线<br/>9 lane]
-  PEER[其他 die / Davinci] -->|UB 8×224 Gbps| UBN
+  PEER[其他 die / 主计算设备] -->|UB 8×224 Gbps| UBN
   UBN --> BAT[Batcher + Batcher.mem<br/>对外唯一入口]
-  BAT --> NOC[NoC 2D mesh 6×8<br/>64 B @ 2 GHz]
-  NOC --> C0[AICORE 0]
-  NOC --> C1[AICORE 1]
-  NOC --> CN[… AICORE n]
-  C0 --> M0[local DRAM<br/>384 MB @ 1 TB/s]
+  BAT --> NOC[NoC 2D mesh 40/48 节点待定<br/>64 B @ 2 GHz]
+  NOC --> C0[SuperscalarNPU 0]
+  NOC --> C1[SuperscalarNPU 1]
+  NOC --> CN[… SuperscalarNPU n]
+  C0 --> M0[local DRAM<br/>384 MiB @ 1 TB/s]
   C1 --> M1[local DRAM]
   CN --> MN[local DRAM]
 ```
@@ -110,132 +97,169 @@ flowchart TD
 
 | 部件 | 职责 | 不承担什么 |
 |---|---|---|
-| **UB 总线** | 机柜内与 die 间互连；接 Host CPU 与 Davinci | 不直接触及 AICORE |
-| **Batcher** | 外部 ↔ AICORE 的唯一桥梁；输入数据、kernel 二进制下发；结果回写落点 | 不参与核间数据交换 |
+| **UB 总线** | 机柜内与 die 间互连；接 Host CPU 与主计算设备 | 不直接触及 SuperscalarNPU |
+| **Batcher** | 外部 ↔ SuperscalarNPU 的唯一桥梁；输入数据、kernel 二进制下发；结果回写落点 | 不参与核间数据交换 |
 | **NoC** | 核间 payload 搬运与集合通信 | 不承担对外 I/O；不存储路由表 |
-| **AICORE + local DRAM** | 计算与权重驻留 | local DRAM 不对其他核可见 |
+| **SuperscalarNPU + local DRAM** | 计算与权重驻留 | local DRAM 不对其他核可见 |
 
 两条结构性约束贯穿全文：
 
-- **对外只有一个口。** 任何从片外进入 AICORE 的字节必经 Batcher，AICORE 的输出也必须回写 Batcher。指令与常量的 cache miss 回填也走这条路（第 4 节）。
-- **对内没有共享内存。** 核 A 要拿到核 B 的数据，只能由核 B 主动从 NoC 发出去。
+- **对外只有一个口。** 任何从片外进入 SuperscalarNPU 的字节必经 Batcher，SuperscalarNPU 的输出也必须回写 Batcher。指令与常量的 cache miss 回填也走这条路（第 4 节）。
+- **跨核没有隐式共享内存。** 核 A 要拿到核 B 的数据，只能由核 B 主动从 NoC 发出去。
 
 ### 2.2 三个时钟域
 
 | 边界 | 关系 | 后果 |
 |---|---|---|
 | Reticle 内 NoC | 同步，2 GHz | Calendar 时隙可以按 cycle 编排 |
-| AICORE ↔ NoC | **异步**（1.4 GHz ↔ 2 GHz） | 跨界需握手；核程序不感知 NoC cycle |
-| Batcher ↔ AICORE | **异步** | Batcher 下发与核执行不共享时间基准 |
+| SuperscalarNPU ↔ NoC | **异步**（1.4 GHz ↔ 2 GHz） | 跨界需握手；核程序不感知 NoC cycle |
+| Batcher ↔ SuperscalarNPU | **异步** | Batcher 下发与核执行不共享时间基准 |
 
 这三道边界解释了 Calendar 方案为什么把对齐做成硬件内部的事：核程序只能表达"我到了"，无法表达"第几拍发"，发包时机必须由 NoC 侧的 `CalReg` 决定。
 
-> **命名冲突提醒。** 本文里"UB"有两个含义：核内的 **Unified Buffer（384 KB 片上缓冲）**，和对外的 **UB 总线（组网互连）**。下文凡指缓冲处写作"UB（Unified Buffer）"，指互连处写作"UB 总线"。
+> **命名约定。** 本文的 UB 仅表示对外互连总线。旧核 Unified Buffer 的 384 KiB 数值保留为向量/通信工作集预算，不继续作为新核的软件地址空间名称。`local DRAM` 是核外物理存储，`Local Tile` 是新核的 Tile 状态，两者不同。
 
-## 3. AICORE 微架构与规格
+## 3. SuperscalarNPU 核结构与 WSE 目标配置
 
-一个 AICORE = 1 个 Cube + 1 个 Vector，主频 1.4 GHz。计算部分沿用 Davinci 的流水组织（Scalar 发射，MTE 搞搬运，Cube/Vector 算，FixPipe 写回），改动全部集中在存储侧。
+### 3.1 从流水编号转向程序、Block 与 Tile 依赖
 
-### 3.1 计算规格
+每个 SuperscalarNPU 核执行包含标量控制和 Tile 运算的程序。Thread 保有独立程序身份；SPE 完成取指、块控制、标量依赖管理与乱序执行，Tile 工作交给 VEC、CUBE 和 MEM 等执行域。TMU 管理 Tile 绑定、物理分配、就绪及生命周期。执行完成、结果发布、顺序提交和外部写入可见是不同事件。
 
-| 精度 | Cube 形状（M×K×N per cycle） | MAC/cycle | 单核算力 @1.4 GHz | 比例 |
-|---|---|---|---|---|
-| FP16 | 16×16×16 | 4 096 | 11.5 TFLOPS | 1 |
-| FP8 | 16×32×32 | 16 384 | 45.9 TFLOPS | 4 |
-| FP4 | 16×64×32 | 32 768 | 91.8 TFLOPS | 8 |
-
-Vector 并行度 256 B/cycle，即 FP16 下 128 elem/cycle、179 G elem/s。FixPipe 带宽 256 B/cycle，与 Vector 齐平。
-
-**一个值得注意的比例。** FP16 下 Cube 每 cycle 消费 16×16 = 256 个权重元素 = 512 B，而 local DRAM 每 cycle 只能供 1 TB/s ÷ 1.4 GHz ≈ 714 B。两者同量级——这正是 WSE 的设计点：**在权重只用一次的场景下，Cube 与内存带宽大致匹配**。
-
-### 3.2 片上存储层次
-
-| 层级 | 容量 | 用途 |
+| 组成 | 核内职责 | WSE 接口要求 |
 |---|---|---|
-| L0A | 128 KB | Cube 左矩阵（激活） |
-| L0B | **512 KB** | Cube 右矩阵（权重） |
-| L0C | 256 KB | Cube 累加输出 |
-| L1 | 1 MB | 片上大缓冲 |
-| UB（Unified Buffer） | 384 KB | Vector 工作区；核间通信竞技场候选位置 |
-| local DRAM | 384 MB @ 1 TB/s，2 KB page | 本核权重与大张量驻留 |
+| SMT | Thread 身份与线程服务 | 区分核节点号、Thread ID 与参与掩码 |
+| SPE | IFU、BCTRL、OOO、IEX、DTU；标量程序和块顺序 | 形成控制/访存操作数，关联精确故障与恢复 |
+| VEC | 向量与逐元素运算 | 消费已就绪 Tile，按结果协议写回 |
+| CUBE | 矩阵运算 | 满足整核吞吐目标，使用明确的 Tile 输入输出 |
+| TMU | Tile 绑定、重命名、存储与生命周期 | 对通信源做保留，对通信目的建立独占写入与就绪协议 |
+| MEM | 标量、Tile 和索引访存；TLSU 属于 MEM | 连接 WSE 地址译码、local DRAM 和外部数据端口 |
+| GPE | 核内 Group 协作 | 与跨核 Calendar 域分开，不直接充当 NoC 集合通信 |
 
-### 3.3 与 Davinci 基线的差异
+上述是职责划分，不要求各域各有一份独立物理副本。SPE 的内层 ROB 管理标量顺序，BROB 管理 Block 顺序；不能再用“所有工作共用一个统一 ROB”的早期框图替代当前合同。
 
-| 项 | Davinci 基线 | WSE | 为什么改 |
-|---|---|---|---|
-| 全局内存 | GM（HBM，全片共享） | **取消**，换成每核 local DRAM | 去掉共享带宽瓶颈 |
-| L0B | 较小 | **512 KB**，是 L0A 的 4 倍 | 权重驻留面更大，减少重复加载 |
-| 低精度 | 以 FP16/INT8 为主 | 增 FP8 / FP4，算力 4× / 8× | 权重字节数减半 / 减四分之三 |
-| 核间通信 | 经 GM 或 HCCS | **NoC + Calendar** 显式集合通信 | 没有 GM 可经 |
-| 对外通道 | PCIe / 设备直通 | **必经 Batcher** | 单入口，便于集中调度 |
+### 3.2 保留的整核吞吐目标
 
-### 3.4 对算子开发的直接影响
+| 精度 | 整核等效 MAC/cycle | 目标算力 @1.4 GHz | 说明 |
+|---|---:|---:|---|
+| FP16 | 4096 | 11.4688 TFLOPS | 等效 16×16×16 |
+| FP8 | 16384 | 45.8752 TFLOPS | 等效 16×32×32，WSE 目标 |
+| FP4 | 32768 | 91.7504 TFLOPS | 等效 16×64×32，WSE 目标 |
 
-- **2 KB page 是实际读写粒度。** 比这小的随机访存浪费带宽；权重布局应按 2 KB 对齐切块。
-- **容量决定切分下界。** 单核 384 MB 是权重驻留的硬上限，直接决定一个专家能否整体放下、要切几份（第 17 节）。
-- **L1 不再是路由表的家。** Calendar 方案把路由信息放进 `.rodata`，经 D-Cache 取用，**不占 L1**，因此不与 GEMM 的 L1 分配器互斗（第 4 节）。
+Vector 保留整核 256 B/cycle 的目标；输出转换/写回路径也以原 256 B/cycle 为预算目标，但不再指定旧 FixPipe 指令或物理模块。内部采用多个 PE 时，以上目标均为聚合值。资料中的四 PE 参考组织可以作为实现候选；目前 Shared TMATMUL 合同还存在固定四 PE 的协作条件，改变 PE 数必须同步修改对应 ISA profile 和编译约束。
+
+峰值比值不证明实际吞吐。发射、Tile 端口、Shared 数据供给、累加器和写回都必须供得上；FP8 的 WSE 4×目标尤其不能从其他参考配置自动继承。
+
+### 3.3 保留容量，重新定义预算归属
+
+| 原 WSE 容量 | 新核中的目标预算用途 | 尚需定稿的实现 |
+|---|---|---|
+| L0A 128 KiB | CUBE A 操作数暂存 | Tile backing、读缓冲与端口划分 |
+| L0B 512 KiB | CUBE B/权重驻留 | Local/Shared 分工、bank 和供数路径 |
+| L0C 256 KiB | 矩阵累加与结果暂存 | 累加状态和结果 Tile 的交接 |
+| L1 1 MiB | 通用片上 Tile backing 预算 | Local/Shared 分区、分配和回收 |
+| Unified Buffer 384 KiB | 向量/通信工作集预算 | arena、向量中间结果、双缓冲配额 |
+| local DRAM 384 MiB | 每核权重与大张量 | 1 TB/s、2 KiB page 的 WSE 端口 |
+
+本版容量统一使用二进制单位：1 KiB=1024 B，1 MiB=1024² B；这是现有 WSE 模型 `analysis/platform.py` 对旧 KB/MB 数值的解释。带宽 GB/s、TB/s 使用十进制单位。
+
+前五项作为互不重叠的容量预算保留，总计 **2304 KiB（2.25 MiB）/核**。它们不等于已经确定的五块新核 SRAM。Local/Shared 是 Tile 作用域与访问契约，不是额外叠加的两份容量；同一 Tile 必须只计入一个 backing pool。缓存、队列、重命名表和控制存储未由此表覆盖，需单独预算。
+
+### 3.4 Tile 状态和通信生命周期
+
+Local Tile 的相对 hand、代际、大小与物理 Cell 地址分开管理，Shared Tile 也有自己的绑定与所有权。SSM NDF 的 Local Tile 采用 128 B Cell 粒度，当前核合同的单 Tile 范围为 128 B–32 KiB；这不是总寄存器存储容量，也不是 PTO ISA 所有实现的统一上限。
+
+因此 48 KiB 接收 arena 不能直接假设可装入一个 Local Tile。本版选择 Shared backing 作为 router 接收的基线路径；较大 arena 可由多个合法 Shared 对象组成，并逐一绑定和跟踪覆盖，不能假定单对象容量无限。具体对象分段、预算和可选内存窗口列入 Q7，在确定前不把 `B.ASSEMBLE` 等同于任意 NoC 落点写入。
+
+对通信源，TMU/适配器需锁定实际绑定的代际与物理位置，直到数据读出责任结束；对通信目的，只有范围完整、写入可见且去重计数满足时才能向依赖消费者发布就绪。旧物理槽被回收后的迟到响应必须被身份检查拒绝。
 
 ## 4. 存储层次与数据通路
 
-去掉 GM 后，数据在 WSE 上走**两条完全不同且互不相交**的路。把它们分开是读懂本系统的关键。
+### 4.1 三种含义不能混用
 
-### 4.1 两条路
+`GM` 是 ISA 的普通内存访问域；local DRAM 是 WSE 的物理存储；Local/Shared Tile 是核内数据对象。采用 SuperscalarNPU 不意味着自动恢复跨核全局 HBM，也不意味着删除新核所有 GM 访存指令。
+
+本版提出 WSE 目标地址映射：本核权重/张量地址映射到本核 local DRAM，代码和常量映射到 Batcher 后的程序镜像，跨核 payload 仍经显式 Calendar 操作。具体虚拟地址布局、保护、缓存属性和故障编码列入 Q13。SSM 当前 NDF 中统一 GM、PTO-TSO 和多核一致性假设不能直接套在 WSE 上；局部映射必须在目标 ISA/profile 中明确，不能由模型静默改写内存语义。
+
+### 4.2 代码、常量与 payload 的通路
 
 ```mermaid
 flowchart LR
-  subgraph A[路一：指令与常量]
-    DDR[DDR<br/>.text + .rodata] --> BM[Batcher.mem] --> IC[I-Cache 2 KB 块]
-    BM --> DC[D-Cache 64 B 行] --> GPR[标量寄存器]
-  end
-  subgraph B[路二：payload]
-    LD[local DRAM<br/>2 KB page] --> L1B[L1 / UB] --> L0[L0A/L0B] --> CU[Cube]
-    L1B <-->|NoC| PEER[对端核竞技场]
-  end
+  DDR[程序镜像 DDR] --> BM[Batcher.mem]
+  BM --> IC[指令缓存及取指接口]
+  BM --> DC[标量常量缓存路径]
+  DC --> GPR[SPE 标量操作数]
+  DRAM[本核 local DRAM] <--> MEM[MEM / TLSU]
+  MEM <--> TILE[Local / Shared 数据服务]
+  TILE <--> EU[VEC / CUBE]
+  MEM -->|TX 描述符与源数据| ADP[WSE router 核端接口与 CDC]
+  ADP -->|RX 写请求| SHM[Shared memory owner 专用 router 端口]
+  SHM -->|写入确认| ADP
+  SHM <--> TILE
+  TMU[TMU 绑定和发布 owner] -.授权和引用保留.-> MEM
+  TMU -.目标代际和范围.-> SHM
+  ADP -.接收完成证据.-> TMU
+  ADP <--> NOC[Calendar router / NoC]
 ```
 
-| | 路一：指令与常量 | 路二：payload |
+图中的接口是 WSE 对 SuperscalarNPU 的新增集成要求：**MEM.TLSU 增加 router 发送/控制接口，Shared memory owner 增加独立的 router 接收写入接口**。发送从 TLSU 取得合法源数据；接收经 Shared 存储仲裁落地。TMU 继续独占绑定、代际和发布/回收责任，router 不直接改 Tile ready 位。具体 RTL 信号和 ISA 编码尚待实现。
+
+Batcher 的输入激活也通过受控数据端口落入目标 backing。端口需区分请求被接受、实际写入完成以及消费者可见，携带 Core/Thread/目标代际身份，并支持背压。NoC 入口、Batcher 入口与 MEM/TLSU 的写冲突必须由同一个存储 owner 仲裁。
+
+### 4.3 标量静态表与缓存预算
+
+Calendar 静态表继续放入只读程序镜像，通过标量 load 取得。编译期立即数属于 A 类；每次 launch 的参数属于 B 类；线程私有中间状态属于 C 类。`blockId` 在本版表示 **NoC 节点号**，不等于 Block 动态身份 BID，也不等于 Thread ID。
+
+在 40 节点 Calendar 基线下保留 16 B 表项、64 B 对齐与目标 64 B cache line。key-major 布局下每节点访问 `keyCount` 条 cache line；node-major 下最多压缩至 `ceil(keyCount/4)` 条。这个计算描述地址工作集，不保证缓存没有冲突或驱逐。若每个 Thread 使用私有 D-cache，同一节点多个 Thread 重复读取会产生额外物理副本；可以由节点通信 owner 集中读取，但不得宣称天然只有一份。
+
+指令回填原 2 KiB 粒度可作为 WSE 程序端口目标保留，不能等同于新核 I-cache 行大小。静态表不占 payload Tile backing，仍需占标量缓存和取数带宽。
+
+### 4.4 带宽目标
+
+| 通路 | WSE 目标 | 归属 |
 |---|---|---|
-| 走什么 | kernel 代码、立即数、`.rodata` 静态表、kernel 入参 | 权重、激活、中间结果 |
-| 链路 | **DDR → Batcher.mem → I$ / D$** | local DRAM ↔ L1/UB ↔ L0 ↔ Cube；跨核走 NoC |
-| 粒度 | I$ 2 KB 块，D$ 64 B 行 | local DRAM 2 KB page；NoC 64 B flit |
-| 频度 | 模型加载一次 + 冷 miss | 每轮推理 |
-| **不经过** | ★ **不经 local DRAM、不经 L1** | 不经 I$/D$ |
+| local DRAM | 1 TB/s/核 | 新核所有内部 PE 共享整核预算 |
+| NoC 单链路 | 128 GB/s/方向 | 64 B × 2 GHz，未扣头部和空隙 |
+| UB 总线组网 | 224 GB/s | 8 × 224 Gbps |
+| UB 总线 Host 方向 | 14 GB/s | 1 × 112 Gbps |
 
-这条★常被误读。指令和常量的 cache 回填 **不走 local DRAM**——local DRAM 是算子数据面的存储，不是核的主存；也 **不走 L1**，L1 完全留给 GEMM。
+1 TB/s ÷ 224 GB/s ≈ 4.46 是保留权重驻留策略的带宽动机；它不是整个 SoC 的吞吐倍数。MEM/TLSU 到 local DRAM 的实际有效带宽需扣除 page、bank、排队和共享端口损耗。
 
-### 4.2 一条 LD 背后的三条链
+### 4.5 TLSU、Shared memory 与 router 的接口合同
 
-任何一条标量 load 的值，按**户籍**分三类，三类的时间尺度差一个数量级：
+一个 NoC 节点连接一个 SuperscalarNPU 核；节点内的多个 Thread 通过受控仲裁共享通信端点。下面是逻辑通道，独立逻辑责任不要求独立物理总线。所有通道都须跨 1.4 GHz 核域与 2 GHz router 域安全交接。
 
-| 类 | 来源 | 时间尺度 | 例子 |
-|---|---|---|---|
-| **A 类** | 编译期确定，随二进制一起下发 | **模型加载一次** | 立即数（→ `.text`）、静态表（→ `.rodata`） |
-| **B 类** | 运行期由 Host/Runtime 下发 | **每次 launch** | kernel 入参、tiling、`blockId` |
-| **C 类** | 核自己产生，没有上游 | 运行期 | 栈、中间变量 |
-
-把一个值从 B 类推到 A 类，等于把它的下发频度从"每次 launch"降到"模型加载一次"。Calendar 方案对路由表做的就是这件事（第 11 节）。
-
-### 4.3 静态表为什么不撞爆 D-Cache
-
-直觉上，把全片所有节点的路由位图都发射成一张表（die 级一份拷贝）会把 D-Cache 撑爆。实际不会，原因只有两条：
-
-1. D-Cache **只在被某条 LD 实际命名过的地址上分配行**；没被访问的字节永远躺在 DDR。
-2. 索引用的 `blockId` 在整个 kernel 内是常量。
-
-两条合起来，本核触碰的地址集合可以在编译期完整枚举：每个 key 恰好 2 条 LD、落在同一条 64 B 行上。于是每核占用 = `keyCount` 条 cache 行，**与全片节点数无关**。
-
-这与"随机索引大 LUT"的区别不在表大，而在**下标的时间性质**：后者的下标每次迭代都在变，工作集 = 整张表；前者的下标每核一次确定，访问模式退化成"每 key 一个固定地址"，首次 miss 后 100% 命中。
-
-### 4.4 带宽汇总
-
-| 链路 | 带宽 | 算法 |
+| 接口 | 方向与内容 | 接收方承担的责任 |
 |---|---|---|
-| local DRAM（每核） | 1 TB/s | 规格 |
-| NoC 单链路单向 | **128 GB/s** | 64 B × 2 GHz |
-| UB 总线对外（组网） | **224 GB/s** | 8 × 224 Gbps |
-| UB 总线对 Host CPU | **14 GB/s** | 1 × 112 Gbps |
+| TLSU router-command | TLSU → 适配器：本地事务 ID、Thread/Block/代际、opcode/epoch、源绑定、几何、routeBits、对称目的范围 | 原子接受完整描述符；容量不足时不形成半条事务；与普通 GM 请求区分 |
+| TLSU router-data | TLSU → 适配器：源数据、字节使能、事务/segment/beat 身份、结束标志 | 源绑定已就绪且被引用保留；按规定字节数接收，不能读到被回收的新代际 |
+| Shared router-write | 适配器 → Shared owner：接收上下文 token、目标代际、offset、有效字节、源/segment/beat 身份 | 检查范围与授权，仲裁 TLSU/Batcher/其他写端口，完成存储写入；router 不提交任意物理 Cell 地址 |
+| Shared router-write-response | Shared owner → 适配器：相同身份、已写入范围、可见性确认或故障 | 只在确认的数据可供指定消费者观察时交付成功证据；队列接收不等于写入完成 |
+| router-completion | 适配器 → TLSU/块管理、TMU：登记接受、源读出结束、发送排空、接收完成或故障 | 各事件独立保留、恰好交付一次；TMU 决定 Tile 发布，BROB 决定 Block 提交 |
+| TMU reservation | TMU ↔ TLSU/适配器/Shared owner：绑定解析、目标写授权、引用保留和释放 | 在事务收束前保持对象有效；恢复后旧响应不得作用于复用槽位 |
 
-**这张表里藏着系统的真正约束：每核 local DRAM 带宽是单条 NoC 链路的约 8 倍。** 核内读权重很快，核间搬运很慢。任何切分方案若需要把与权重同量级的数据过 NoC，都会把 WSE 的带宽优势抵消掉——这是第 17 节选择切 N 轴而不是切 K 轴的根本原因。
+ready/valid 仅表示一次通道交接：背压时 payload 与身份保持稳定，成功交接只记一次。若采用 credit 流控，则必须明确 credit 的资源单位，且仅在对应资源实际释放后归还。CDC 队列、完成通道和控制/故障通道不得等待“消费者已读 Tile”才能前进。
+
+本地事务身份不自动加入线上 flit 头。线上如何承载或重建 source、segment、地址范围和 epoch 仍属 C-2/S-6/Q14；现有 12/14 B 开销只是已列头字段的基线，不能拿它代表新增身份信息已经免费传输。
+
+### 4.6 接收资源、调度准入与正常完成
+
+接收登记、报到及发送请求对外生效前均须满足 non-flush 资格。一次集合对齐前，节点必须保留源绑定和目标 Shared backing，建立接收上下文，并预留去重、写确认和完成反馈容量。接收上下文记录目标代际、合法写范围、预期来源/segment 集合和 expVal。多个写端口不得并发覆盖同一接收范围；不同不重叠范围可以按存储 owner 的仲裁规则并行。
+
+**align 表达“本轮可按时收发”，不只表达“程序走到了这里”。** 每个成员提交 align 之前，接收登记必须已成功，发送描述符/数据 staging 或其有界供给服务也必须就绪。无法预留时在入网前停留；不能先占 router 队列再等待 TMU 分配目标。
+
+有限 credit 只能防止溢出，不能独自证明 Calendar 时隙无冲突。正常调度需要对 Shared 写端口、TLSU 供数、CDC 和 RX 缓冲给出有界服务保证，并将最大等待和仲裁干扰计入 NoC 调度证明。Batcher 或后台 TLSU 不能无界抢占已预约的接收服务。若违约，停止本轮新注入并进入故障收束；未经重新调度和去重协议，不允许自行延后发送或重放到其他时隙。队列深度和带宽尚未确定前，不宣称端到端无死锁或无拥塞已经证明。
+
+到包先检查身份并登记 pending segment，pending 副本也要抑制，不能等写确认后才去重。对拆成多个 beat 的 segment 保留字节覆盖，只有成功提交的唯一远端有效字节增加 expVal 计数；头部、填充、重传、自拷贝及失败写入均不计。相同身份却不同地址/长度的副本是故障。
+
+当且仅当远端计数达到 expVal、远端与本地自拷贝共同覆盖目标、所有写入可见、Shared 参与/producer 义务满足且没有故障时，TMU 才发布对应代际。远端计数超额、范围重叠或不完整不能由“count >= expVal”掩盖。Shared memory 是存储端口，Shared Tile 是架构对象，两者通过 TMU 的合法绑定关联。
+
+### 4.7 排空与故障收束
+
+源数据被可靠复制到发送缓冲后，可以结束 TX 持有的源 Tile 读引用；本地自拷贝和其他消费者的读引用独立保留，全部引用收束后才能回收源对象。网络发送责任继续保留到真实 TX 排空。本版 `calendar_drain_send` 仅证明本地 TLSU/适配器 TX 工作已完成注入且无本地待发送数据，不证明网络已经排空，也不证明远端写入可见；后者由接收侧写确认和发布路径证明。
+
+全片排空必须由所有节点完成状态汇合和网络在途责任检查证明，或采用另行验证的有界排空协议；具体控制通道/确认方式列入 Q14，不隐含假定已有 ACK 指令。多播节点同时承担转发和落核时的资源依赖也必须纳入网络证明。
+
+launch 边界的全片排空同时要求 TLSU 发送、CDC、router、RX 待写、Shared 写确认、计量与完成反馈无在途责任，且 TMU 引用已正确收束。故障也必须保留已接受事务的状态，直到所有可能访问该代际的请求终结或被系统级复位隔离，之后才能回收 backing、复用 epoch 或安装新的 CalReg。停止注入不等于可以立即清空去重记录。故障后已写入的数据保持为未发布的失败代际，隔离于正常消费者；保留诊断或安全丢弃的策略由恢复 ABI 定义，不能自动套用 TLOAD 的故障部分结果语义。
 
 ## 5. NoC 架构
 
@@ -243,26 +267,26 @@ flowchart LR
 
 | 项 | 取值 |
 |---|---|
-| 拓扑 | 2D mesh 6×8（1 Reticle） |
+| 拓扑 | Calendar 基线 5×8；物理候选 6×8，Q1 待定 |
 | 总线位宽 | 64 B |
 | 时钟 | 2 GHz，Reticle 内同步 |
 | 单链路单向带宽 | 128 GB/s |
-| 对角跳数 | 5 + 7 = 12 跳（维序路由下的最坏情况） |
+| 对角最短路径 | 5×8 为 11 跳；6×8 为 12 跳；实际 multicast 树深另算 |
 
 2D mesh 的代价在于**中心链路是天然热点**：多对多集合通信下，中间行列的链路要承载远多于边缘的流量。对带宽型负载，这意味着尾时延不可控。
 
 ### 5.2 为什么需要 Calendar
 
-传统动态仲裁（虚通道 + 背压）在此不适用，因为本系统的核心诉求是**极低时延**而不是峰值吞吐：
+Calendar 将正常流量的发送时刻放到编译期规划；有限缓冲仍需要安全流控。相较主要依靠运行期仲裁的方案，它的收益以端口服务和时隙证明成立为前提：
 
 | 动态仲裁 | Calendar |
 |---|---|
 | 拥塞时背压，尾时延长尾 | 编译期错峰，尾时延可预测 |
-| 每跳查路由表，有状态 | 每跳无表、无状态，按 flit 头位图转发 |
+| 每跳查路由表，有状态 | 每跳无需路径查表，按 flit 头位图转发 |
 | 无需全局时间基准 | 依赖 BSP 对齐与全域时隙表 |
 | 任意流量模式 | 要求流量模式编译期可知 |
 
-大模型推理的通信模式恰好是**静态的**——每层的 AllGather 形状在编译期全部已知。这是 Calendar 成立的前提。
+本方案要求集合形状和参与者在编译期确定，或经固定容量映射后满足同样条件；数据相关的 MoE 参与行为仍须解决 Q6。
 
 ### 5.3 NoC 在 Calendar 下的行为
 
@@ -271,7 +295,7 @@ NoC 只做两件事，两件都是**被动**的：
 1. **路径：按 flit 头自带的位图转发。** 每个节点一个 `{P, L}` 位对：`P=1` 表示经过，`L=1` 表示落核。节点本地查自己的位对就能决定转发与落核，**无需任何路由表存储**。
 2. **时机：按 `CalReg[opcode]` 放行。** 时隙表内容在装载期一次性写入各节点寄存器，kernel 期只读。
 
-拆包、转发复制、目的端 merge 对软件完全透明。
+AllGather 的拆包与转发复制由网络承担；归约 merge 的类型与完成语义仍待 C-3/C-10 定义。
 
 ### 5.4 代价：flit 头开销
 
@@ -282,23 +306,23 @@ NoC 只做两件事，两件都是**被动**的：
 | `routeBits` | 80 bit = 10 B |
 | `opcode` + `redOp` | 6 bit |
 | `epochTag` | 待定（建议 8–16 bit） |
-| **合计** | **≈ 12 B，占 64 B 链路的 ≈ 19%** |
+| **合计** | **8 bit epoch 基线为 12 B（18.75%）；16 bit 时为 13 B（20.31%）** |
 
-这 19% 就是"NoC 每跳无状态"的标价。替代方案（逐 packet 头 + 沿途保留上下文）能省带宽，但把状态还给了 NoC，尚未决断。
+8 bit epoch 基线下的 18.75% 就是"NoC 每跳不保留路径上下文"的标价。替代方案（逐 packet 头 + 沿途保留上下文）能省带宽，但把状态还给了 NoC，尚未决断。
 
-> **注。** 现有 Calendar 设计文档按 **40 个 NoC 节点（5×8）** 写就，`routeBits` 的 80 bit 宽度直接来自这个数字；本文硬件章节按需求方给出的 **6×8 = 48** 写。两者需对齐（附录 Q1）；若为 48 节点，`routeBits` 应为 96 bit，flit 头约 14 B（占 22%）。
+> **注。** 现有 Calendar 设计文档按 **40 个 NoC 节点（5×8）** 写就，`routeBits` 的 80 bit 宽度直接来自这个数字；本版同时保留 **6×8 = 48** 物理候选。两者需对齐（附录 Q1）；若为 48 节点，`routeBits` 为 96 bit；8 bit epoch 时头为 14 B，16 bit 时为 15 B。原 16 B 路由表项也无法容纳 12 B 位图加 6 B 尾字段，Q1 决定前不得发射该布局。
 
 ## 6. Batcher 与 UB 总线
 
 ### 6.1 Batcher：唯一的对外入口
 
-Batcher 坐在 Host/Davinci 与 AICORE 阵列之间，是**外部世界进入芯片的唯一通道**。它同时承担四类职责：
+Batcher 坐在 Host/主计算设备 与 SuperscalarNPU 阵列之间，是**外部世界进入芯片的唯一通道**。它同时承担四类职责：
 
 | 职责 | 方向 | 频度 |
 |---|---|---|
 | 算子 kernel 二进制下发（`.text` + `.rodata` 同批） | 入 | 每 kernel 一次 |
 | 权重下发到各核 local DRAM | 入 | 模型加载一次 |
-| 输入激活分发给各 AICORE | 入 | 每次推理 |
+| 输入激活分发给各 SuperscalarNPU | 入 | 每次推理 |
 | 各核计算结果汇收回写 | 出 | 每次推理 |
 
 **Batcher.mem 是一个双重角色的部件**：它既是数据面的暂存（输入分发、结果汇收），也是控制面的中转（每核 I-Cache / D-Cache 的 miss 回填都经它从 DDR 取）。后一个角色很容易被忽略，却直接决定了冷启动的代价：多核同时冷 miss 时，Batcher.mem 是共享的，代价不按核数线性展开。
@@ -309,9 +333,9 @@ Batcher 坐在 Host/Davinci 与 AICORE 阵列之间，是**外部世界进入芯
 
 ```mermaid
 sequenceDiagram
-  participant D as Davinci
+  participant D as 主计算设备
   participant B as Batcher
-  participant C as AICORE 阵列
+  participant C as SuperscalarNPU 阵列
   D->>B: 输入 token 激活
   B->>C: 分发（按核切分）
   C->>C: 计算 + NoC 集合通信
@@ -325,7 +349,7 @@ sequenceDiagram
 
 | lane 分配 | 速率 | 用途 |
 |---|---|---|
-| 8 lane | 8 × 224 Gbps = 224 GB/s | 组网互连（die 间 / 与 Davinci） |
+| 8 lane | 8 × 224 Gbps = 224 GB/s | 组网互连（die 间 / 与主计算设备） |
 | 1 lane | 1 × 112 Gbps = 14 GB/s | 机柜内 Host CPU |
 | **合计** | **9 lane** | |
 
@@ -340,189 +364,145 @@ sequenceDiagram
 
 ## 7. 软件栈总览
 
-软件栈有**六层**，其中三层是开发者可见的，三层是工具链内部的。
-
 ```mermaid
 flowchart TD
-  U[用户：Python 算子描述] --> P[PyPTO 编程框架]
-  P --> I[PTO-ISA<br/>90+ 条 tile 虚拟指令]
-  P -.编译期旁路.-> CAL[路由表 / 时隙表<br/>调 NoC C 算法]
-  I --> CCE[CCE intrinsic]
-  CCE --> BS[Bisheng 编译器]
-  BS --> BIN[达芬奇核指令二进制<br/>.text + .rodata]
-  CAL --> BIN
-  CAL --> REG[CalReg 全域镜像]
-  BIN --> RT[Runtime]
-  REG --> RT
-  RT --> BATCH[Batcher 下发]
-  BATCH --> HW[AICORE 执行]
+  U[用户算子] --> P[PyPTO / Tile IR]
+  P --> LOW[WSE 目标 lowering]
+  LOW --> ISA[PTO Block / Scalar / Tile 指令]
+  ISA --> BIN[目标汇编编码与链接]
+  P --> ALG[NoC 路由与时隙算法]
+  ALG --> ROD[routeBits 只读表]
+  ALG --> CAL[CalReg 独立镜像]
+  BIN --> PKG[WSE 部署包]
+  ROD --> PKG
+  CAL --> PKG
+  PKG --> RT[Runtime / Batcher / NoC 装载端口]
 ```
 
 ### 7.1 各层契约
 
-| 层 | 输入 | 输出 | 对上层隐藏什么 |
-|---|---|---|---|
-| **PyPTO** | 用户算子 + 切分意图 | PTO 指令序列 + 通信表 | 拓扑、时隙、核间同步细节 |
-| **PTO-ISA** | tile 级语义 | 跨代统一的虚拟指令 | 不同代 Ascend 的微架构差异 |
-| **路由/时隙表** | IR 中的 GROUP 与集合语义 | `routeBits` 静态表 + `CalReg` | NoC 拥塞管理 |
-| **CCE** | PTO 指令 | 近硬件 intrinsic | 寄存器分配、流水编号 |
-| **Bisheng** | CCE | 达芬奇二进制 | 指令调度、寄存器分配 |
-| **Runtime** | 二进制 + 权重 + 表 | 下发与调度动作 | Batcher 细节 |
+PyPTO 表达计算与集合语义，WSE lowering 负责内存映射、Tile 绑定、Block 组织、核内 Thread 协作和 Calendar 依赖；目标工具链负责具体编码、重定位与链接。旧 CCE → Bisheng → 达芬奇机器码路线不再是本目标的编译链。
 
-### 7.2 一条不寻常的旁路
+SSM 的指令登记表可以证明某些指令名与执行类别存在，不能证明 WSE backend、ABI 或完整编译器已经实现。最终二进制 ISA 版本与工具链 revision 必须锁定到部署包。
 
-注意上图里那条虚线：**路由表与时隙表不走 PTO-ISA → CCE → Bisheng 这条主线**。它们在 PyPTO 编译期由 NoC 提供的 C 算法**一次性联合产出**，然后分两路落地：
+### 7.2 两份通信产物仍需同源
 
-- `routeBits` → 发射成 `.rodata` 静态表 → 与 `.text` 同批进二进制
-- `CalReg` → 装载期写入 NoC 节点寄存器，**不进二进制**
+NoC 算法一次读取拓扑、参与组、载荷几何和并发关系，同时产出 `routeBits` 与 `CalReg`。前者与 `.text` 一同进入程序镜像，后者作为独立装载物写入 NoC。只验证版本相同不足以证明调度无冲突，仍需算法提供可核验的调度保证。
 
-这两条链物理分离，带来一个必须靠编译期兵兵担保的不变式（第 11.4 节的 O1）。
+### 7.3 编译器必须看见的区别
 
-### 7.3 这个分层为什么必要
+核内 Group 协作与跨核 Calendar 集合使用不同参与者、不同进度和不同完成域。编译器必须同时识别这两层，不能把四 PE 的 Group 操作扩展成 40/48 个 NoC 节点的集合。
 
-可以追问：为什么不让用户直接写 CCE？三个理由：
+## 8. PyPTO 编程与目标映射
 
-1. **跨代迁移。** PTO-ISA 把算子从具体微架构上解耦，同一份算子可跑 A2/A3/A5 与 WSE。
-2. **通信与计算的联合优化需要全局视野。** 时隙表的生成需要知道**所有**集合通信的并发关系，这只能在框架层看到。
-3. **正确性约束需要类型系统抽保。** 例如路由与时隙必须同源这类不变式，靠手写 CCE 无法保证。
+### 8.1 用户算子与核内执行
 
-## 8. PyPTO 编程框架
+用户继续描述 Tile 计算和跨核集合。新核通过 Block 属性、Tile 输入输出绑定与就绪依赖组织执行，软件不再直接分配旧 `PIPE_MTE1..4` 或用旧 `set_flag` 规定新核内部流水。
 
-PyPTO 是用户写作算子的入口，也是整个软件栈里**唯一同时看到计算与通信全局视野**的一层。它在 WSE 上承担的职责比在传统 Ascend 上多一块：生成路由与时隙信息。
+框架可以保留自动切分和显式 Tile 调优两类入口，但显式配置必须落在新核合法的 Local/Shared 绑定、大小、布局和生命周期上，不能把旧 L0/UB 地址原样作为新核物理 Cell 地址。
 
-### 8.1 用户写什么
+### 8.2 核内与跨核通信
 
-算子以 tile 为单位描述，而不是以标量循环描述：用 `TLOAD` / `TMATMUL` / `TADD` / `TSTORE` 这类指令拼出数据流，用 `TSYNC` 与 `Event` 表达流水依赖。核间通信同样是 tile 级的，与计算指令共享同一套 tile 类型与事件语义。
-
-开发模式有两条：
-
-| 模式 | 用户控制什么 | 适用 |
+| 层次 | 数据移动 | 完成依据 |
 |---|---|---|
-| **Auto** | 只写计算语义，tile 划分与同步交给框架 | 快速验证逻辑 |
-| **Manual** | 显式 `TASSIGN` 绑定片上地址、自控事件 | 性能打磨 |
+| 核内 Tile/Group | 已定义的 Tile 操作与核内 Group 协作 | Tile/Group 的绑定、依赖、发布与提交合同 |
+| 跨核 Calendar | WSE NoC 适配器，按 `routeBits` 与 `CalReg` 发送 | 本轮有效提交字节达到 `expVal`，并满足发送排空与可见性条件 |
+| 非 Calendar 跨核路径 | 仅保留扩展需求 | FIFO、门铃和目标指令均需单独定义 |
 
-### 8.2 核间通信的两条路径
+旧文中的 `TPUSH/TPOP` 等框架名称不构成新核已有机器指令的证据。首期通信闭合目标为 AllGather；Reduce 系列仍受 C-3/C-10 限制，不因更换核而自动获得实现。
 
-WSE 没有 GM，所以切分后的 tensor 必须靠显式通信拼回来。PyPTO 提供两套语义，按**拓扑是否可算**分流：
+### 8.3 编译期责任
 
-| | **GridPipe（非 Calendar）** | **TCalendar** |
+1. 识别核内 Thread/PE 协作和跨核参与组，并指定每节点的通信 owner。
+2. 根据 WSE 目标配置分配 Tile/backing、双缓冲空间与通信生命周期。
+3. 联合生成路由和时隙，检查同 opcode 集合之间的并发冲突。
+4. 保留 64 B 对齐的 `.rodata` 表，固定 `keyId/opcode/expVal/capacity/selfOff`。
+5. 检查路由树、落点覆盖、收发守恒与 40/48 节点布局边界。
+6. 建立非投机资格、接收登记、发送、排空、完成与消费依赖。
+7. 按第 9 节区分已有 ISA 和待定义 Calendar 扩展，再交给目标编码工具链。
+
+路由表本身不占 Tile backing，但通信源、目的和工作 Tile 仍需要活跃区间、容量与端口预算。
+
+## 9. 指令与接口更新
+
+### 9.1 已有的新核指令基础
+
+下列名称在本次查阅的 SSM 指令登记表或当前 NDF 中有依据；具体编码、操作数和合法组合仍以所锁定 PTO 版本为准。
+
+| 作用 | 指令/状态基础 | WSE 中的使用 |
 |---|---|---|
-| 适用拓扑 | 整行、整列、子矩形或显式 peer——软件能现场算出对端 | 任意、非均匀或时隙化拓扑 |
-| PTO 接口 | `TPUSH` / `TPOP` / `TREDUCE` / `TBROADCAST` | `TCalendar<K>` |
-| 控制面 | 显式 FIFO 门铃（READY / FREE / CLOSE） | 无硬件状态；路径与时隙随包走 |
-| 完成语义 | READY/FREE 闭合跨核 FIFO | MTE4 按实收有效字节计量，达 `expVal` 即完成 |
-| 信号量占用 | 占用 | **不占** |
+| Block 控制 | `BSTART`、`BSTOP` | 程序组织、动态 Block 身份与顺序提交 |
+| Local Tile 绑定 | `B.IOT` | 输入绑定、目的大小和代际关联 |
+| Shared Tile 绑定 | `B.IOS` | 核内 Shared 对象的使用 |
+| 几何和属性 | `B.DIM`、`B.DIMI`、`B.DATR`、`B.FPATR` | 分离形状、布局与浮点属性；编码名见目标规范 |
+| 视图与组装 | `B.SUBVIEW`、`B.ASSEMBLE` | 合法子范围与目的覆盖；不是任意 DMA 发布指令 |
+| 内存与 Tile 搬运 | `TLOAD`、`TSTORE`、`TMOV` | 经过 WSE 内存映射与 Tile 合同 |
+| 计算 | `TMATMUL`、`TADD` 等 | CUBE/VEC 执行与 Tile 依赖 |
 
-集合通信语义覆盖 `AllGather` / `Reduce` / `AllReduce` / `ReduceScatter` / `Scatter` / `Gather`；首期实现 `AllGather` 与 `Reduce`，其余预留码位。
+这里的 Local/Shared 不是旧 `__ubuf__`/`__cbuf__` 的别名。普通标量 load 仍可读取路由表，但读取完成不代表 Calendar 发送已取得外部副作用资格。
 
-### 8.3 PyPTO 在编译期多做的七件事
+### 9.2 Calendar 的语义接口提案
 
-这是 WSE 特有的。编译算子时，PyPTO 需额外完成：
+本次资料中没有得到可直接使用的 Calendar SEND/RECV 机器编码。以下名称均为**设计伪操作**，用于明确 lowering 和硬件接口，不是汇编助记符：
 
-1. 从 IR 识别 GROUP、集合通信语义与**集合间并发关系**
-2. 读入目标芯片拓扑与 PG 信息（这两项**不属于 IR**）
-3. 调用 NoC 提供的 C 算法，一次产出 `routeBits` 与 `CalReg`
-4. 发射 `.rodata` 静态表，64 B 对齐，**不做 per-core 裁剪**
-5. 为每个调用点固定立即数：`keyId` / `opcode` / `expVal` / `capacity` / `selfOff`
-6. 校验十余条结构约束（位对合法、诱导子图为树、落核完备、收发守恒……）
-7. 下沉指令序列：`LD → TSYNC → align → MTE4 感知 → MTE3 send → join`
+| 伪操作 | 必需输入 | 成功/故障边界 |
+|---|---|---|
+| `calendar_align` | 节点参与组、opcode、集合 epoch、launch 身份和本轮资源准入状态 | 所有成员接收登记及有界收发服务已就绪后才对齐放行；不能拿核内 barrier 替代 |
+| `calendar_post_receive` | 接收对象/代际、范围、capacity、expVal、opcode、epoch | 在 align 前登记并预留接收资源；登记独立完成，数据完成异步报告 |
+| `calendar_send` | 源 Tile 绑定、几何、对称目的范围、routeBits、opcode、epoch | 非投机且资源可接受后交接，源数据保留至读出责任结束 |
+| `calendar_drain_send` | 本轮发送身份 | 本地 TLSU/适配器 TX 已完成注入；全网排空另按第 4.7 节判断 |
+| `calendar_await_receive` | 接收令牌/代际 | 有效 payload 已写入可见范围并达到 expVal；失败不会发布成功结果 |
 
-**不需要做的三件事**同样关键：活跃区间分析、按容量装箱、与 GEMM 的 L1 分配器互斥——因为路由表不占 L1，只受 D-Cache 预算约束。
+接收上下文还需保存来源与 segment identity 用于去重，区分已提交 payload、重复包、自拷贝和旧 epoch。`launch` 身份可以由严格排空隔离，也可以由显式标签实现；后一种方案不能未经决议扩充当前 flit 头。具体 opcode 分配、操作数字段、异常码、token 编码和端口协议列入 Q14。
 
-## 9. PTO-ISA
+### 9.3 与旧核接口的替换关系
 
-PTO（Parallel Tile Operation）是 Ascend CANN 定义的 **tile 级虚拟 ISA**，定义了 90+ 条标准 tile 指令。它不是硬件指令集，而是一层稳定的编程契约。
-
-### 9.1 抽象机模型
-
-PTO 的机器模型有四个要素：
-
-| 要素 | 含义 |
+| 旧核接口 | 新核设计要求 |
 |---|---|
-| **Tile** | 带形状、数据类型与物理位置修饰的二维数据块 |
-| **Buffer 层级** | `__gm__` / `__cbuf__`（L1）/ `__ubuf__`（UB）等地址空间限定词 |
-| **Pipe** | `PIPE_M`（Cube）/ `PIPE_V`（Vector）/ `PIPE_MTE1..4` 等独立流水 |
-| **Event** | 流水间依赖的显式表达（`TSYNC` 等待，`RecordEvent` 发布） |
+| CCE/Bisheng 内核目标 | WSE 目标 lowering 与 SuperscalarNPU 指令编码/ABI |
+| `LOAD2D / MAD / FIXPIPE` 展开 | Tile 搬运、矩阵操作、结果转换及发布，按目标 ISA 定义 |
+| `MTE3_NOC_SEND` | `calendar_send` 提案，由 WSE NoC 适配器承担外部发送 |
+| `MTE4_NOC_RECV_WAIT` | 拆成接收登记与最终等待，保护后续发送的推进能力 |
+| `SET_CROSS_CORE` | 跨节点 align 提案，参与者是 NoC 节点而不是核内 Thread |
+| `TSYNC / pipe_barrier / RecordEvent` | 区分 Tile 数据就绪、外部发送排空、接收可见和 Block 提交 |
 
-### 9.2 指令分类
+旧方案“控制面新增 0 条、数据面新增 2 条”的结论失效；需要在 PTO 所属仓库确定新的 ISA/ABI 绑定后才能重新计数。
 
-| 分类 | 代表指令 |
-|---|---|
-| 同步 | `TSYNC`、`SYNCALL` |
-| 资源绑定 | `TASSIGN`、`SETFMATRIX` |
-| 数据搬运 | `TLOAD`、`TSTORE` |
-| 矩阵 | `TMATMUL` |
-| 逐元素 | `TADD`、`TMUL`、`TEXP`、`TRELU`…… |
-| 轴归约 | `TROWSUM`、`TCOLMAX`…… |
-| **通信扩展** | `TPUSH`/`TPOP`、`TREDUCE`/`TBROADCAST`、**`TCalendar`** |
+### 9.4 推测、退休与背压
 
-通信扩展集是本系统的重点：它们遵循与计算指令相同的 tile 抽象与事件语义，因此**通信可以与计算写在同一个融合 kernel 里**，而不是两个阶段。这对极低时延目标至关重要。
+Calendar 请求可以在核内准备操作数，但错误路径不能向 NoC 发送、改变接收上下文或参加不可撤销的跨节点汇合。发出外部副作用前，必须满足对应 Block/Thread 的 non-flush 条件和外部顺序约束；这不等于把所有指令都强制串行到 ROB 头。
 
-### 9.3 为什么需要这一层
+接收登记的完成与集合数据的完成必须分离。否则较早的接收等待会挡住较年轻发送的 non-flush/提交资格，即使收发物理队列独立也会死锁。适配器必须保留发送进展所需的队列、资源与提交路径，具体深度在 Q14 中确定。
 
-PTO-ISA 与达芬奇核指令是 **多对多** 映射，不是改名：一条 `TMATMUL` 展开成一系列 `LOAD2D` / `MAD` / `FIXPIPE`，具体展开形态随代际变化。把这层差异固定在工具链里，算子源码才能从 A2/A3 直接移到 WSE。
+所有响应保留请求身份和代际；恢复后迟到响应不能写入新分配对象。已发生的跨核写入不得当作可随分支回滚的本地推测结果。故障时停止新的正常发布，并按系统错误与排空协议处理在途事务。
 
-对 WSE 而言还多一层价值：**取消 GM 是一个地址空间层面的改动**。原本写成 `__gm__` 的访存需要重新落到 local DRAM 或核间通信上，这类重写由 PTO backend 承担，用户算子逻辑不变。
+## 10. 编译产物与部署契约
 
-## 10. 编译流程
+### 10.1 产物
 
-从用户算子到可下发二进制，主线四跳，旁路一条。
+部署包包含目标 `.text`、只读 `routeBits` 表、独立 `CalReg` 镜像、版本/profile 元数据和每核权重分片。编译器必须在声明中记录核内 Thread 配置、每节点通信 owner、目标内存映射和 Calendar ABI 版本。当前仓库的 manifest 校验器只表达部分检查，不等于已有完整 WSE 编译器。
 
-```mermaid
-flowchart TD
-  SRC[用户算子<br/>Python / C++ PTO] --> FE[PyPTO 前端<br/>图→IR、切分、GROUP 识别]
-  FE --> ALG[NoC C 算法<br/>输入：拓扑 + PG + 并发关系]
-  FE --> LOW[PTO 指令序列]
-  LOW --> CCE[CCE intrinsic<br/>C/C++ 近硬件层]
-  CCE --> BS[Bisheng]
-  BS --> OBJ[.text + .rodata]
-  ALG -->|routeBits| OBJ
-  ALG -->|CalReg| SIDE[时隙表镜像<br/>独立产物]
-  OBJ --> PKG[部署包]
-  SIDE --> PKG
-```
+### 10.2 自检
 
-### 10.1 各阶段产物
+F1/F2/F3 继续适用：Calendar 运行状态不得误放入共享静态变量；编译期 key 引用不得被意外物化；路由表保持只读、尺寸正确且至少 64 B 对齐。另需检查：
 
-| 阶段 | 输入 | 产物 |
-|---|---|---|
-| PyPTO 前端 | 算子描述 | IR；tile 几何；GROUP 与集合语义 |
-| NoC C 算法 | 拓扑 + PG + 集合间并发关系 | 逐 source 的 `routeBits`；全域 `CalReg`；`conflictProof` |
-| PTO 下沉 | IR | PTO 指令序列 + 立即数 |
-| CCE 层 | PTO 指令 | intrinsic 调用，含 `__ubuf__` 等限定词 |
-| Bisheng | CCE | 达芬奇机器码 |
-| 链接 | 目标文件 | `.text` + `.rodata`（同一批） |
+- 二进制采用声明的新核 ISA/profile，不能混入旧核 MTE/CCE 编码。
+- `keyId/opcode` 与路由表绑定一致，静态字段按已确定 ABI 编码。
+- 接收登记不会堵住发送的非投机资格；外部副作用与恢复合同相容。
+- Tile 分配、arena 覆盖、发布、回收和容量检查闭合。
+- 指令、静态表、时隙镜像与权重的目的内存窗口合法。
 
-### 10.2 编译期必须跑过的自检
+### 10.3 版本校验
 
-这套自检不是可选项。它们是"删掉原子选表指令"后唯一的一致性锚点：
-
-| 编号 | 禁令 | 怎么查 |
-|---|---|---|
-| **F1** | `.data` / `.bss` 中不得出现 Calendar 自有符号 | `nm` 看符号类型，应接近 0 |
-| **F2** | `CalendarKeyRef` 常量不得被物化（不得取地址） | 符号表中不应出现 `kRowAllGather` 等 |
-| **F3** | `.rodata` 段 `AddrAlign ≥ 64` | `readelf -S` |
-| — | `kCalendarRoute` 必在 `.rodata`，大小 == `keyCount×节点数×16` | `nm` 类型为 `R`/`r` |
-| — | 反汇编中 `opcode` 确实是立即数 | 反汇编检查 |
-| — | 反汇编中**没有**任何 Calendar 专用控制面指令 | 反汇编检查 |
-
-### 10.3 三个版本号
-
-编译产物携带三个版本号，装载期联合校验，任一不匹配必须 fault：
-
-| 版本号 | 标识什么 |
-|---|---|
-| `topologyVersion` | 编译期假设的物理拓扑 |
-| `calendarVersion` | 时隙表内容 |
-| `routeVersion` | `routeBits` 静态表内容 |
-
-它们是代替"一条指令原子选中路由/时隙"的系统级保险丝。
+保留 `topologyVersion/calendarVersion/routeVersion` 三版本检查。更换核后，还需校验部署包声明的 ISA/profile 和 Calendar ABI；字段格式未定，不能把它们伪装成现有三版本之一。任何不匹配必须在执行前失败，重新装载或失败校验后不能复用旧的“已验证”资格。
 
 ## 11. Calendar 通信编排
 
 Calendar 是为 WSE NoC 设计的通信优化方案：**把"走哪里"和"何时发"两类信息都挪到编译期，运行期 NoC 只做被动执行。**
 
 ### 11.1 两类信息、两条载体
+
+下表与第 11.5 节的寄存器对、缓存工作集计算均限于 40 节点基线；48 节点需先解决 Q1 的表项布局，不能沿用两条 load 和每行四项的结论。
 
 | | **路由信息** | **时隙信息** |
 |---|---|---|
@@ -545,43 +525,49 @@ Calendar 是为 WSE NoC 设计的通信优化方案：**把"走哪里"和"何时
 | `11` | 经过且落核（可续转） |
 | `01` | **非法** |
 
-NoC 节点只看自己的位对：`L=1` 落核提交；转发集 = 【`P=1` 的邻居】减【入口】。因此**每跳无表、无查表通路、无状态**。
+NoC 节点只看自己的位对：`L=1` 落核提交；转发集 = 【`P=1` 的邻居】减【入口】。因此**每跳无需路径查表或每包路由上下文**；CalReg、流控与接收计量仍有状态。
 
 编译期必须校验：`{P=1}` 的诱导子图连通、含 source、**无环（是树）**。否则包会在 mesh 上无限繁殖。
 
 ### 11.3 一轮集合的七个步骤
 
+本版将旧核“对齐后登记接收”改成**登记并准入后对齐**，防止乱序核与 Shared 端口的不确定等待突破 arm-lead 假设。下列伪操作不是新指令编码，旧模型 Step0–Step6 仍待迁移。
+
 ```mermaid
 sequenceDiagram
-  participant S as Scalar
-  participant M3 as PIPE_MTE3
-  participant N as NoC
-  participant M4 as PIPE_MTE4
-  S->>S: Step0 MatMul 产出 sendTile
-  S->>S: Step1 Barrier 前序完成
-  S->>S: Step2 Align SET_CROSS_CORE(opcode) 全组汇合
-  S->>M4: Step3 下发 RECV_WAIT(expVal, opcode, epoch)
-  S->>M3: Step4 发包，携 routeBits + opcode
-  M3->>N: flit
-  N->>M4: 按 CalReg[opcode] 放行，落核写竞技场
-  S->>S: Step5 Join 排空 MTE3，等 MTE4 达 expVal
-  S->>S: Step6 RecordEvent
+  participant C as SPE / TLSU
+  participant T as TMU / Shared owner
+  participant A as router 核端适配器
+  participant N as Calendar router / NoC
+  C->>T: Step0 计算源 Tile，保留源和目标代际，取得 non-flush 资格
+  C->>A: Step1 post_receive，预留接收和完成资源
+  A->>T: 取得目标范围写授权和有界服务
+  A-->>C: 接收登记成功
+  C->>A: Step2 准备发送描述符及有界供数
+  C->>A: Step3 calendar_align，报告节点已准入
+  A->>N: 全参与节点准入汇合
+  N-->>A: 共同时间原点及合法发送窗口
+  C->>A: Step4 提交已准备的发送工作
+  A->>N: 在合法窗口释放 flit
+  N->>A: 本轮远端 payload
+  A->>T: 去重后提交 Shared router-write
+  T-->>A: 写入及可见性确认
+  C->>A: Step5 等 TX 排空与接收证据
+  A->>T: expVal、范围覆盖、无故障证据
+  T-->>C: Step6 Shared 义务满足后发布结果
 ```
 
-两个容易误解的点：
+Step4 的本地提交必须包含在调度证明的有界 arm-lead 预算内；也可提前将描述符锁存在适配器，由 Step3 的释放事件启动，但对齐前不能注入 NoC。普通乱序执行不能提供一个未经证明的固定时间上界。
 
-- **MTE4 不搬运数据。** 载荷由 NoC 直接写进本核竞技场，MTE4 只对匹配 `{opcode, epoch, dstRange}` 的有效载荷**计量**，累计达 `expVal` 才退休。
-- **发包走 MTE3，不是新流水。** MTE3 就是既有的核间写通路，本方案只给它加操作数。
+epoch 在接收登记和发送描述符中一致绑定，登记后到本轮收束前不能复用。节点内各 Thread 的计算就绪先汇总到一个通信 owner；每个 NoC 节点只对本轮报到一次。等待接收证据仅阻塞依赖消费者，不能占住后续发送必需的资源或 non-flush 条件。
 
-完成条件是**字节计量**，不是通知：不设 `Notify`，不分配信号量，不建 `collectionEpoch`。
-
-### 11.4 四条排序不变式
+### 11.4 排序与参与不变式
 
 | # | 不变式 | 破坏后果 |
 |---|---|---|
 | **O1** | **路由与时隙同源**：同一次发包的 `routeBits` 与 `opcode` 必须来自同一逻辑身份 | 包沿正确路径走、按错误时隙放行 ⇒ 计划外冲突，**编译期查不出来** |
-| **O2** | **对齐先于发送**：Step2 返回后才入队 MTE3 | 错峰失效 ⇒ 链路冲突（**不是**静默错转发） |
-| **O3** | **感知先于发送，排空先于等待** | 丢失早到数据的计量，或全组死锁 |
+| **O2** | **对齐先于发送**：Step3 完成后才允许本轮发送进入 NoC | 错峰失效 ⇒ 链路冲突（**不是**静默错转发） |
+| **O3** | **接收登记和资源准入先于对齐，最终等待不能阻断发送推进** | 丢失早到数据的计量，或全组死锁 |
 | **O4** | **`routeBits` 就绪先于首包** | 用到未定义路由位图 |
 | **E1** | **分支参与一致**：同 `opcode` 域内成员核调用次数与顺序逐次一致 | `epochCtr` 错位 ⇒ 按错 epoch 丢包 |
 
@@ -594,7 +580,7 @@ sequenceDiagram
 | | 占用 | 量级（`keyCount`=2、40 节点） |
 |---|---|---|
 | DDR | `keyCount × 节点数 × 16 B` | 1 280 B，**die 级一份** |
-| 每核 D-Cache | `keyCount` 条 64 B 行 | **128 B** |
+| 单个节点通信 owner 的标量缓存工作集 | `keyCount` 条目标 64 B 行 | **128 B**，私有缓存副本另计 |
 
 并且 D-Cache 占用可以再降四倍：把表转置成 node-major 后，本核的 `keyCount` 个表项连续，占 `⌈keyCount/4⌉` 条行。指令数、寻址形态、表总字节数全不变（待决项 C-9）。
 
@@ -615,9 +601,9 @@ Runtime 负责把编译产物变成芯片上的状态，并在每次推理时驱
 | kernel 二进制（`.text`+`.rodata`） | Batcher | DDR 代码段/数据段，**miss 时经 Batcher.mem 到 I$/D$** | 每 kernel 一次 |
 | 模型权重 | Batcher | **各核 local DRAM** | 模型加载一次 |
 | `CalReg` 时隙表 | 不经 Batcher.mem | **NoC 节点寄存器** | 一次性 |
-| 输入激活 | Batcher | 各核 UB / L1 | 每次推理 |
+| 输入激活 | Batcher | 各核通信/激活 backing | 每次推理 |
 
-这张表是本系统最容易记错的一张。三个常见误解："路由表会进 L1"（不会，进 D-Cache）、"指令要过 local DRAM"（不过）、"时隙表每轮下发"（不是，一次性）。
+这张表是本系统最容易记错的一张。三个常见误解："路由表占 Tile backing"（不占，走标量常量路径）、"指令要过 local DRAM"（不过）、"时隙表每轮下发"（不是，一次性）。
 
 ### 12.2 冷启动与稳态
 
@@ -625,13 +611,13 @@ Runtime 负责把编译产物变成芯片上的状态，并在每次推理时驱
 stateDiagram-v2
   [*] --> 装载期
   装载期: kernel + 权重 + CalReg→硬件
-  装载期 --> 稳态: 三版本号校验通过
+  装载期 --> 稳态: 三版本与目标 ISA/ABI 校验通过
   稳态: 每次 launch 只下发激活 + 描述符
   稳态 --> 稳态: 下一个 token
   装载期 --> 失败: 版本号不匹配 → fault
 ```
 
-稳态下每次 launch 的下发量极小——**不下发任何 Calendar 数据**，不做 per-core 展开，不下发运行期描述符。这正是把路由信息从 B 类推到 A 类的收益（第 4.2 节）。
+稳态下每次 launch 下发激活与必要的启动描述符，**不重新下发 Calendar 静态表与时隙镜像**。这正是把路由信息从 B 类推到 A 类的收益（第 4.2 节）。
 
 ### 12.3 调度约束
 
@@ -640,7 +626,7 @@ Runtime 必须兑现四条约束，否则集合通信会错：
 1. **按完整 group 调度。** 分 wave 时不得拆开正在同步的组。
 2. **相边界插 barrier。** 保证 launch 之间全片 Calendar 流量排空——跨 launch 的 epoch 隔离完全依赖这一条。
 3. **`CalReg` 写入必须在停机窗口内。** 写入期间不得有 Calendar 流量在飞。
-4. **提供 `blockId`。** 优先用 `block_idx` SPR（0 次访存）；否则随 args 下发，变成 B 类值，多一次 LD。
+4. **提供 NoC 节点身份 `blockId`。** 通过目标 ABI 的只读系统身份或 launch 参数提供；当前不宣称新核存在旧 `block_idx` SPR。Thread ID 单独提供。
 
 同时 Runtime **不做**两件事：不预建 `collectionEpoch`，不分配 notify counter。每轮 epoch 由核内计数器给出，Host 看不到 kernel 内的轮次。
 
@@ -650,7 +636,7 @@ Runtime 必须兑现四条约束，否则集合通信会错：
 
 ## 13. 编译期：从 Python 到二进制包
 
-本部分把前面的静态架构串成一条时间线。三个阶段的分界标志很清楚：**编译期**结束于二进制包生成，**加载期**结束于三版本号校验通过，**运行期**从 kickstart 开始——过了 kickstart，Host 就再也插不上手。
+本部分把前面的静态架构串成一条时间线。三个阶段的分界标志很清楚：**编译期**结束于二进制包生成，**加载期**结束于三版本与目标 ISA/ABI 校验通过，**运行期**从 kickstart 开始——过了 kickstart，Host 就再也插不上手。
 
 ### 13.1 时间线
 
@@ -664,7 +650,7 @@ flowchart TD
   A5 --> A6b[CalReg → 独立镜像]
   A3 --> A7[固定立即数<br/>keyId/opcode/expVal/selfOff]
   A7 --> A8[下沉指令序列]
-  A8 --> A9[CCE → Bisheng]
+  A8 --> A9[WSE 目标编码与链接]
   A6a --> A10[链接：.text + .rodata]
   A9 --> A10
   A10 --> A11[编译产物自检<br/>F1/F2/F3]
@@ -685,7 +671,7 @@ flowchart TD
 | kernel 机器码 | `.text` | DDR 代码段 |
 | `routeBits` 静态表 | `.rodata`，64 B 对齐 | DDR 数据段 |
 | `CalReg` 全域镜像 | 独立二进制段 | NoC 节点寄存器 |
-| 三个版本号 | 元数据 | 装载期校验 |
+| 三版本号 + ISA/profile/Calendar ABI 标识 | 元数据（新增格式待定） | 装载期校验 |
 | 模型权重 | 按核切好的分片 | 各核 local DRAM |
 
 ## 14. 加载期：三条下发链路
@@ -710,23 +696,23 @@ flowchart LR
 | 经 Batcher | 是 | 是 | **否**（直达 NoC 节点） |
 | 终点 | DDR，运行期回填 I$/D$ | 各核 local DRAM | NoC 节点寄存器 |
 | 经 local DRAM | **否** | — | 否 |
-| 经 L1 | **否** | 否 | 否 |
-| 写入要求 | 无特殊要求 | 按 2 KB page 对齐 | **停机窗口内原子写，不得有流量在飞** |
+| 占 Tile backing | **否** | 装载到 local DRAM，执行时再取入 Tile | 否 |
+| 写入要求 | 无特殊要求 | 按 2 KiB page 对齐 | **停机窗口内原子写，不得有流量在飞** |
 
-第三列的特殊性值得强调：`CalReg` 是唯一**不经 Batcher** 的下发物，因为它的目的地是 NoC 而不是 AICORE。
+第三列的特殊性值得强调：`CalReg` 是唯一**不经 Batcher** 的下发物，因为它的目的地是 NoC 而不是 SuperscalarNPU。
 
 ### 14.2 装载期校验
 
 校验通过才能进稳态。失败必须 fault，不得降级运行：
 
-- `topologyVersion` / `calendarVersion` / `routeVersion` 三方匹配
+- `topologyVersion` / `calendarVersion` / `routeVersion` 三方匹配，同时核对新核 ISA/profile 和 Calendar ABI
 - 目标芯片物理拓扑与编译期假设一致（无坏核/坏链重映射）
 - `selfOff` 铺满性；各核行覆盖完整；`expectedRxBytes == expVal`
 - 对称地址、容量、`opcode` 合法；`blockId` 在范围内
 
 ### 14.3 kickstart
 
-kickstart 是分界线：置 PC = 入口，置栈指针，I$ 与 D$ invalidate。**它不搬任何数据**，只动控制状态。过了这一点，剩下的全是片上自治。
+kickstart 按新核启动 ABI 建立各 Thread 的入口、栈和参与状态，完成必要的程序/数据可见性维护，再允许执行。具体启动指令和寄存器由 Q15 定稿，不能沿用旧核单 PC 的隐含初始化。它不重新搬运权重或路由表。
 
 ## 15. 运行期：一次 decode step
 
@@ -734,17 +720,17 @@ kickstart 是分界线：置 PC = 入口，置栈指针，I$ 与 D$ invalidate�
 
 ```mermaid
 sequenceDiagram
-  participant D as Davinci
+  participant D as 主计算设备
   participant B as Batcher
-  participant C as AICORE
+  participant C as SuperscalarNPU
   participant N as NoC
   D->>B: 输入激活 + 专家路由结果
-  B->>C: 分发到各核 UB/L1
+  B->>C: 分发到各核通信/激活 backing
   Note over C: Step0 读 local DRAM 权重 → Cube 算分片结果
-  Note over C: Step1 Barrier：前序完成 + 数据就绪
-  C->>C: Step2 Align（全组汇合）
-  C->>C: Step3 下发 MTE4 感知（expVal）
-  C->>N: Step4 MTE3 发包（routeBits + opcode）
+  C->>C: Step1 在 non-flush 条件下登记 Shared 接收并保留资源
+  C->>C: Step2 源数据、发送描述符及 non-flush 就绪
+  C->>C: Step3 全组准入并对齐
+  C->>N: Step4 非投机发送（routeBits + opcode）
   N->>C: 按 CalReg[opcode] 放行，写对端竞技场
   C->>C: Step5 Join（排空 + 等齐）
   Note over C: Step6 续算或下一段通信
@@ -759,7 +745,7 @@ sequenceDiagram
 | 段 | 主导因素 | 怎么压 |
 |---|---|---|
 | 器件间往返 | UB 总线 + Batcher 分发 | 加大算子粒度，减少往返次数 |
-| 核内计算 | local DRAM 带宽 | 降精度（FP8/FP4），2 KB 对齐 |
+| 核内计算 | 有效计算吞吐、Tile 供数与 local DRAM 带宽 | 形状利用率、精度与 2 KiB 页布局 |
 | 核间通信 | NoC 链路 + 对齐开销 | Calendar 错峰；切分选通信量小的轴 |
 | 尾部同步 | 最慢核 | 负载均衡；避免专家倾斜 |
 
@@ -767,10 +753,10 @@ sequenceDiagram
 
 第 2.2 节的两道异步边界在运行期具体化为：
 
-- **Batcher ↔ AICORE。** 分发与核执行不共享时间基准，核靠数据就绪信号开工，而不是靠约定时刻。
-- **AICORE ↔ NoC。** 核只能表达"我到了"（Step2 报到），无法表达"第几拍发"。发包时机由 NoC 侧 `CalReg` 决定，BSP 在硬件内部对齐全组时间原点，**不返回给程序**。
+- **Batcher ↔ SuperscalarNPU。** 分发与核执行不共享时间基准，核靠数据就绪信号开工，而不是靠约定时刻。
+- **SuperscalarNPU ↔ NoC。** 核通过 Step3 报告“本轮资源已准入且可按时收发”，无法表达"第几拍发"。发包时机由 NoC 侧 `CalReg` 决定，BSP 在硬件内部对齐全组时间原点，**不返回给程序**。
 
-对齐后硬件预留一段 **arm lead time**，用于让核把 Step3 的感知命令和 Step4 的全部发包描述符入队。编译期必须校验这段时间足够覆盖最坡情况。
+接收登记和容量准入在对齐前完成。对齐后的 **arm lead time** 只覆盖已准入发送的剩余有界准备；TLSU/Shared/router 的服务上界必须进入调度证明，不能包含无限等待分配或不确定的程序推进。
 
 ### 15.3 完成判定
 
@@ -787,7 +773,7 @@ expVal（AllGather，不含本地自拷贝）
 
 ## 16. 核间集合通信
 
-没有 GM，"把切分的 tensor 拼回来"就不再是一次内存读写，而是一次显式集合通信。这是 WSE 编程模型与传统 NPU 最大的差别。
+没有跨核隐式共享内存，"把切分的 tensor 拼回来"就不再是一次内存读写，而是一次显式集合通信。这是 WSE 编程模型与传统 NPU 最大的差别。
 
 ### 16.1 对称地址模型
 
@@ -808,12 +794,12 @@ dstSymOff = recvSymBase + selfOff + r × recvRowStride
 以行组 8 路 AllGather 为例：
 
 1. 每个成员持有自己那一段 `sendTile`
-2. 全组在 Step2 对齐
+2. 各节点先登记接收并准备发送资源，再于 Step3 完成全组准入对齐
 3. 每个成员向组内其他成员广播自己那一段，路径由自己那行 `routeBits` 决定（一棵以自己为根的树）
 4. 每个成员的竞技场被 `memberCount` 段铺满
-5. MTE4 计数达 `expVal` 即完成
+5. 适配器取得唯一远端写确认达到 `expVal`，TMU 再检查本地段覆盖与 Shared 共同条件后发布
 
-fabric 若不支持 self-delivery，本核那一段由 Step4s 用普通 `copy_ubuf_to_ubuf` 补写，**不计入 `expVal`**。
+fabric 若不支持 self-delivery，本核那一段由合法 Tile 搬运或 backing 写入补齐，**不计入 `expVal`**。本地段也必须满足覆盖与可见性要求，不能只补一个计数。
 
 ### 16.3 归约类语义
 
@@ -821,14 +807,11 @@ fabric 若不支持 self-delivery，本核那一段由 Step4s 用普通 `copy_ub
 
 这里有一个**必须在 flit 头格式冻结前解决**的缺口：`redOp` 单独不足以确定机器运算，还需要元素类型（建议 3 bit，取 `vtype_t` 子集）。首期只上 `AllGather` 时不阻塞，但不能忽略（待决项 C-3）。
 
-### 16.4 与计算的流水重叠
+### 16.4 与计算重叠
 
-MTE3、MTE4 与 Cube/Vector 是独立流水，因此通信可以与计算重叠。两条关键约束：
+新核可让无依赖的 VEC/CUBE 工作与通信并行，但可重叠程度受 Tile 容量、端口、外部副作用资格和适配器资源限制。一个候选调度是第 i 分片 AllGather 期间计算第 i+1 分片；两者必须使用独立的目的代际和合法双缓冲配额。
 
-- **MTE4 的阻塞不得阻止 AICORE 继续向 MTE3 发指令。** 否则 Step3 会把 Step4 堵死，全组死锁。
-- **`pipe_barrier(PIPE_MTE3)` 必须等实际发出**，不得因为"尚未被 `CalReg` 放行"提前返回。
-
-满足这两条后，一个典型的优化形态是：第 `i` 分片的 AllGather 在飞时，Cube 已在算第 `i+1` 分片。这要求竞技场双 buffer，占 UB 或 L1 容量（竞技场到底落 UB 还是 L1 是待决项 S-2）。
+等待接收不得阻断生成发送所需的标量、Tile 或提交路径；发送完成必须意味着实际满足排空条件，而不是仅进入队列。消费接收结果前还需完成本地自拷贝和所有远端写入可见性。这些条件由第 9.4 节的依赖与恢复协议实现，不以旧 PIPE 编号推断。
 
 ---
 
@@ -861,11 +844,11 @@ flowchart LR
   PC --> P1[各核得到完整结果]
 ```
 
-两相各用一个独立的逻辑身份（`keyId`）与一个 `opcode`，因此 `keyCount = 2`，每核 D-Cache 占用 2 条 64 B 行（node-major 布局下 1 条）。
+两相使用不同 `keyId`（0 和 1），共享 AllGather 的 `opcode=1`，必须顺序执行并推进同一 opcode 域的 epoch。`keyCount=2`，每个通信 owner 的缓存工作集为 2 条目标 64 B 行，node-major 下为 1 条；多线程缓存副本另计。
 
 ### 17.3 容量约束
 
-单核 local DRAM 384 MB 是硬上限。以 FP8 权重估算，单个专家的三个矩阵共 `3 × H × I` 字节；根据 `H`、`I` 与专家数，可以直接算出一个核能驻留几个专家、需要几个核才能装下整层。具体模型尺寸尚未提供（附录 Q5），因此本节不给具体数字。
+单核 local DRAM 384 MiB 是硬上限。以 FP8 权重估算，单个专家的三个矩阵共 `3 × H × I` 字节；根据 `H`、`I` 与专家数，可以直接算出一个核能驻留几个专家、需要几个核才能装下整层。具体模型尺寸尚未提供（附录 Q5），因此本节不给具体数字。
 
 ### 17.4 一个真正的难点：负载倾斜
 
@@ -888,17 +871,17 @@ WSE-Lite #2 只承担 Attention 的**前后投影**，不碰主体计算。这�
 | | 前/后投影（Q/K/V/O） | Attention 主体（QKᵀ/Softmax/AV） |
 |---|---|---|
 | 读什么 | **权重矩阵**，尺寸固定 | **KV Cache**，尺寸随序列长度增长 |
-| 计算强度 | ≈ 2×batch，极低 | 取决于 KV 长度与 batch |
+| 计算强度 | 理想值为 2×batch/每元素字节数 | 取决于 KV 长度与 batch |
 | 驻留可行性 | **可以**，权重不变 | 不行，KV 每步追写 |
 | 适合 WSE | 是 | 否 |
 
-关键在第三行：WSE 的模型是"权重驻留、激活流动"。KV Cache 每步都在长，不符合驻留模型，放在 Davinci 侧才合理。
+关键在第三行：WSE 的模型是"权重驻留、激活流动"。KV Cache 每步都在长，不符合驻留模型，放在 主计算设备 侧才合理。
 
 ### 18.2 一层的协同时序
 
 ```mermaid
 sequenceDiagram
-  participant D as Davinci
+  participant D as 主计算设备
   participant W2 as WSE-Lite #2
   participant W1 as WSE-Lite #1
   D->>W2: hidden state
@@ -938,31 +921,35 @@ O 投影则相反：它的输入是所有 head 拼接后的结果，天然是沿
 |---|---|---|
 | 器件间传输 | UB 总线 224 GB/s | 只能靠增大粒度摊薄 |
 | Batcher 分发/汇收 | Batcher.mem + 异步边界 | 流水化可部分隐藏 |
-| 核内计算 | local DRAM 1 TB/s | 降精度直接减半/减四分之三 |
+| 核内计算 | CUBE/VEC 有效吞吐、local DRAM 及 Tile 供数 | 精度、形状利用率和流水重叠 |
 | 核间通信 | NoC 128 GB/s/链路 + 对齐 | 切分选择；Calendar 错峰 |
 | 尾部同步 | 最慢核 | 负载均衡 |
 
 ### 19.2 带宽与算力配比
 
-前面算过：单核 FP16 平衡点 11.5 FLOP/Byte，FP8 为 45.9。这给出一个直接的工程结论：
+保留峰值目标时，平衡点仍为 11.4688 / 45.8752 / 91.7504 FLOP/Byte。采用实际权重元素大小 b（FP16=2 B、FP8=1 B、FP4=0.5 B），理想 GEMV 权重计算强度为 `2×batch/b`。满阵列、只计权重流量时：
 
-| 精度 | 不再搬运-bound 所需 batch | 含义 |
-|---|---|---|
-| FP16 | ≈ 6 | 小 batch 解码仍搬运-bound |
-| FP8 | ≈ 23 | 算力提升超前于字节数下降 |
-| FP4 | ≈ 46 | 同上，更极端 |
+| 精度 | 满利用率的理论 batch 阈值 | 解释 |
+|---|---:|---|
+| FP16 | ceil(11.4688×2/2) = 12 | 真实权重字节数口径 |
+| FP8 | ceil(45.8752×1/2) = 23 | 同上 |
+| FP4 | ceil(91.7504×0.5/2) = 23 | packed 权重，不含额外格式开销 |
 
-值得注意的是：**降精度对搬运-bound 算子的收益来自字节数，不来自算力。** FP16→FP8 把权重字节减半，搬运时间减半；算力的 4× 提升在这类算子上基本用不上。这意味着 FP8/FP4 的**精度可接受性**比峰值算力更重要。
+v0.1 的 6/23/46 使用与精度无关的 `2×batch` 近似，保留在旧模型 golden vectors 和 decision 0006 中作为历史口径，不能继续当作本版新核的物理阈值。本次没有修改这些测试或模型结果。
+
+实际形状应比较 `compute_time` 与 `fetched_weight_bytes / effective_bandwidth`，其中计算时间需包含 PE/阵列填充、Tile 端口和写回瓶颈。16³ 是本版的等效吞吐预算，不能据此断言新核 batch=1 必然有 1/16 的行利用率。低精度也不能直接推出端到端 2×/4×加速。
+
+端到端时延仍缺 Batcher 规格、设备往返、核内适配端口以及目标算子尺寸；本版不输出未经验证的总时延。
 
 ### 19.3 Calendar 的收益与成本
 
 | 项 | 收益 | 成本 |
 |---|---|---|
-| 每跳无表无状态 | NoC 节点简化，无查表延迟 | flit 头 ≈ 12 B，占链路 **19%** |
-| 时隙错峰 | 尾时延可预测，无拥塞 | 要求流量模式编译期可知 |
-| 路由表进 `.rodata` | 每核 D-Cache 仅 `keyCount` 行；**每次 launch 零下发** | 依赖拓扑同构；坏核需降级路径 |
-| 完成靠字节计量 | 不占信号量，无 notify | 需硬件去重；需跨 launch 排空 |
-| 控制面新增指令 0 条 | 复用既有跨核报到 ISA | 信号量位宽需 ≥ 6 bit |
+| 每跳无路径查表 | NoC 节点简化，无查表延迟 | flit 头 ≈ 12 B，占链路 **19%** |
+| 时隙错峰 | 在调度证明和端口时序约束成立时控制冲突与尾时延 | 要求流量模式编译期可知 |
+| 路由表进 `.rodata` | 每个通信 owner 的工作集为 `keyCount` 条目标 cache line；**每次 launch 零下发** | 依赖拓扑同构；坏核需降级路径 |
+| 完成靠字节计量 | 接收完成不依赖 notify 计数；align 仍需独立参与状态 | 需硬件去重；需跨 launch 排空 |
+| 核接口迁移 | Block/Tile 依赖与通信统一编排 | Calendar ISA/ABI 和非投机接口需重新定义 |
 
 ### 19.4 三个软件侧无法检测的死角
 
@@ -970,11 +957,11 @@ O 投影则相反：它的输入是所有 head 拼接后的结果，天然是沿
 
 | 编号 | 依赖 | 不满足时 |
 |---|---|---|
-| **HW-5** | 接收指令能按 `{opcode, epoch, dstRange}` 累计有效 payload 字节并据此退休 | 本方案最主要的正确性风险 |
-| **HW-7** | 跨核同步信号量位宽 ≥ 6 bit（现为 4 bit，最多 15） | 计数器回绕 ⇒ 未到齐就放行 |
+| **HW-5** | 接收上下文异步累计匹配且已提交的字节；登记独立完成，最终等待同时检查计数、覆盖与可见性 | 本方案最主要的正确性风险 |
+| **HW-7** | 按 NoC 节点计数的参与汇合能覆盖完整参与组 | 计数或身份混淆 ⇒ 未到齐就放行 |
 | **SW-1** | launch 边界前全片 Calendar 流量已排空 | 上一 launch 的滞留副本被误计入 |
 
-HW-7 特别值得注意：现有 4 bit 位宽最多支持 15 核报到，而 FFN phase B 需 32 核、全片集合需 40（若按 48 节点则更多）。这是一个**确定的、已知的硬件修改点**，不是优化项。
+HW-7 的计数若采用整数形式，表示 0..48 至少需要 6 bit；也可采用节点位图。旧核“现有 4 bit”不能作为新核事实。核内四 PE 的报到不等于四个 NoC 节点，具体跨节点硬件由 Q14 定稿。
 
 ---
 
@@ -988,10 +975,10 @@ HW-7 特别值得注意：现有 4 bit 位宽最多支持 15 核报到，而 FFN
 
 | # | 问题 | 影响章节 |
 |---|---|---|
-| **Q1** | **NoC 节点数到底是 40 还是 48？** 需求给的是 6×8 mesh，现有 Calendar 设计文档按 40 节点（5×8）写就，`routeBits` 的 80 bit 宽度直接来自这个数。是 48 个节点中 40 个挂 AICORE（其余 8 个是 I/O / Batcher 节点），还是文档需更新为 96 bit？ | 5、11、17 |
+| **Q1** | **NoC 节点数到底是 40 还是 48？** 需求给的是 6×8 mesh，现有 Calendar 设计文档按 40 节点（5×8）写就，`routeBits` 的 80 bit 宽度直接来自这个数。是 48 个节点中 40 个挂 SuperscalarNPU（其余 8 个是 I/O / Batcher 节点），还是文档需更新为 96 bit？ | 5、11、17 |
 | **Q2** | **一个 WSE-Lite 到底有几个 Reticle / 几个 die？** 全文按单 Reticle 写；若多 Reticle，需要知道：跨 Reticle 是否仍是 mesh、带宽多少、是否同步（现有表述只说"Reticle 内同步"） | 2、5、17 |
-| **Q3** | **Batcher 的具体规格**：Batcher.mem 容量与带宽；对 AICORE 侧的聚合带宽；一个 Batcher 服务多少核；是否支持多个并行分发通道 | 6、14、19 |
-| **Q4** | **DDR 在架构中的位置**。文档反复出现 "DDR → Batcher.mem → I$/D$"，但需求侧只描述了 local DRAM。这个 DDR 是独立于 local DRAM 的片外存储，还是就是 local DRAM 的另一种叫法？容量与带宽？ | 4、14 |
+| **Q3** | **Batcher 的具体规格**：Batcher.mem 容量与带宽；对 SuperscalarNPU 侧的聚合带宽；一个 Batcher 服务多少核；是否支持多个并行分发通道 | 6、14、19 |
+| **Q4** | **DDR 在架构中的位置**。文档反复出现 "DDR → Batcher.mem → I$/D$"，但需求侧只描述了 local DRAM。这个 DDR 是独立于 local DRAM 的片外存储，还是就是 local DRAM 的另一种叫法？容量与带宽、与新核地址映射的关系？ | 4、14 |
 | **Q5** | **目标模型尺寸**：DeepSeek-V4 Pro 的 `H` / `I` / 专家数 / top-k / head 数 / 权重精度。没有这些就无法给出具体切分方案与时延数字 | 17、18、19 |
 | **Q6** | **MoE 负载倾斜的处理策略**。不变式 E1 要求成员核不得条件跳过集合，但 MoE 路由是运行期决定的。是采用固定容量（capacity factor）+ 发零，还是其他机制？ | 17 |
 
@@ -999,12 +986,21 @@ HW-7 特别值得注意：现有 4 bit 位宽最多支持 15 核报到，而 FFN
 
 | # | 问题 | 影响章节 |
 |---|---|---|
-| **Q7** | **竞技场落 UB 还是 L1？**（待决项 S-2）决定 tile 类型的地址空间限定词与双 buffer 的容量预算 | 16、3 |
-| **Q8** | **权重在 local DRAM 中的存储布局与预取机制**。是由 MTE 从 local DRAM 直接搬到 L0B，还是必经 L1 中转？2 KB page 与 L0B 512 KB 怎么配合？ | 3、4、15 |
-| **Q9** | **Davinci ↔ WSE-Lite 的接口形态**：是内存语义（写对端窗口）还是消息语义？同步还是异步？一次往返的基础时延量级？ | 1、6、18 |
+| **Q7** | **Shared 接收 arena 的对象分段和容量预算如何确定？** 基线增加 Shared memory router 写端口；仍需确定每对象范围、TMU 发布和双缓冲配额，可选内存窗口另定 | 16、3 |
+| **Q8** | **权重在 local DRAM 中的存储布局与预取机制**。需确定 MEM/TLSU 到 Local/Shared backing 和 CUBE B 供数的路径；2 KiB page 如何配合 512 KiB 权重预算？ | 3、4、15 |
+| **Q9** | **主计算设备 ↔ WSE-Lite 的接口形态**：是内存语义（写对端窗口）还是消息语义？同步还是异步？一次往返的基础时延量级？ | 1、6、18 |
 | **Q10** | **两台 WSE-Lite 的硬件是否完全相同？** 还是按算子特点做了差异化配置（如不同核数 / 容量）？ | 1 |
 | **Q11** | **权重精度的实际选型**。FP8 与 FP4 在目标模型上的精度可接受性已验证吗？是否需要混合精度（如激活 FP16 + 权重 FP8）？ | 19、3 |
 | **Q12** | **单核或单链路故障时的降级路径**（待决项 C-11）。是允许编译期假设拓扑同构，还是从一开始就按可重映射设计？ | 11、14 |
+
+### A.2.1 更换核新增的集成决策
+
+| # | 问题 | 影响章节 |
+|---|---|---|
+| **Q13** | WSE 地址映射、缓存属性、保护和内存序 profile：如何在每核 local DRAM 下约束新核 GM 访问；是否以及在哪些范围提供一致性 | 3、4、9、14 |
+| **Q14** | Calendar 指令/ABI、TLSU 与 Shared 的 router 通道编码/宽度/深度、有界端口服务、非投机资格、节点 owner、故障和全片排空细化 | 8、9、11、16 |
+| **Q15** | 各 Thread 的启动入口、栈、参与掩码、程序可见性维护和每节点通信 owner 的启动 ABI | 12、14 |
+| **Q16** | 整核 PE 数、CUBE 分片与低精度实现、Vector/写回吞吐、各存储预算的物理映射和缓存/控制额外面积 | 3、19 |
 
 ### A.3 已在现有文档中立档的待决项
 
@@ -1014,29 +1010,54 @@ HW-7 特别值得注意：现有 4 bit 位宽最多支持 15 核报到，而 FFN
 
 以下假设已写进正文，若不成立需回改：
 
-1. 单 Reticle，6×8 mesh，48 个节点位置（待 Q1/Q2 修正）
+1. 单 Reticle；40 节点 Calendar 编码与 48 节点物理候选同时保留，Q1/Q2 未解决前不混用表布局
 2. 权重在模型加载时一次性驻留 local DRAM，稳态不重新下发
 3. 每层 3 次器件间往返（Q/K/V 投影、1 次；O 投影、1 次；FFN、1 次）
-4. Cube 算力按 M×K×N per cycle 解读，每 MAC 计 2 FLOP
+4. CUBE 数值为整核等效 MAC/cycle 的 WSE 目标，每 MAC 计 2 FLOP；不规定物理阵列形状
+5. 核内多 PE 分享整核吞吐与存储预算，不能乘 PE 数重复计算
+6. 外部协同角色称主计算设备，其具体实现不在本次核替换范围内
 
 ## 附录 B：术语表
 
 | 术语 | 含义 |
 |---|---|
-| **AICORE** | WSE 的计算核，1 Cube + 1 Vector，1.4 GHz |
-| **Batcher** | Host/Davinci 与 AICORE 阵列之间的唯一桥梁；内含 Batcher.mem |
-| **UB（Unified Buffer）** | 核内 384 KB 片上缓冲 |
-| **UB 总线** | 对外组网互连，9 lane（与上行同名不同物） |
-| **local DRAM** | 每 AICORE 独享，384 MB @ 1 TB/s，2 KB page |
-| **Calendar** | NoC 通信编排方案；路径与时隙均编译期确定 |
-| **`routeBits`** | 每节点一个 `{P,L}` 位对的路径位图；随每个 flit 走 |
-| **`{P, L}` 位对** | `00` 无关 / `10` 经过不落核 / `11` 经过且落核 / `01` 非法 |
-| **`opcode`** | 时隙寄存器索引；兼作对齐信号量 id；编译期立即数 |
-| **`CalReg`** | NoC 节点常驻的 Calendar 时隙寄存器；装载期写入，kernel 期只读 |
-| **`expVal`** | 本轮期望接收的有效 payload 字节数；集合完成的判据 |
-| **`blockId`** | 本核的 NoC 节点号；本方案唯一的运行期变量下标 |
-| **对称地址** | 全组一致的接收区基址 + 本核段偏移 `selfOff` |
-| **竞技场** | 每核的集合通信接收区（arena） |
-| **A / B / C 类值** | 按下发时机分：随二进制 / 每次 launch / 核自产 |
-| **PTO** | Parallel Tile Operation，CANN 定义的 tile 级虚拟 ISA |
-| **Bisheng** | 毕昇编译器，将 CCE 转为达芬奇二进制 |
+| WSE | SoC；WSE-Lite 是本文保留的协处理部署形态 |
+| SuperscalarNPU | WSE 内的计算核，采用 Block/Tile 与乱序依赖管理 |
+| Thread / PE | 核内程序身份 / 物理执行资源；不能当作 NoC 节点 |
+| SPE / BROB / ROB | 标量处理域 / 外层 Block 顺序管理 / 内层标量顺序管理 |
+| TMU | Tile 绑定、重命名、就绪、存储与生命周期管理域 |
+| MEM / TLSU | 统一访存域 / 其下的标量、Tile 和索引访存单元 |
+| Local / Shared Tile | 核内 Tile 作用域和绑定契约，不等于 local DRAM 或跨核共享内存 |
+| Batcher | 主计算设备与 WSE 核阵列之间的外部桥梁 |
+| UB 总线 | 对外组网互连，9 lane |
+| local DRAM | 每核独享的物理权重/张量存储，384 MiB @1 TB/s 目标 |
+| Calendar / CalReg | 跨核路由和时隙编排 / NoC 节点常驻时隙配置 |
+| routeBits / opcode | 2×节点数 bit 的路径位图 / 3 bit 时隙索引；后者不是处理器指令 opcode |
+| expVal | 本轮期望接收的有效提交 payload 字节数 |
+| blockId / BID | 本文路由表的 NoC 节点索引 / 核内动态 Block 身份，两者不能互换 |
+| arena | 有范围、容量、所有权和发布条件的集合通信接收对象 |
+| A / B / C 类值 | 按下发时机分类：随二进制 / 每次 launch / 核自产 |
+
+## 附录 C：迁移依据和版本边界
+
+本次查阅本机 `SuperScalarModel` 工作区，分支 `feat_pyc_model`，HEAD 为
+`b45ceca2cf26204574a94e732fda05a329163fff`。工作区包含未提交修改，因此 HEAD
+不代表全部被查阅文本；具体文件摘要记录在本仓库 decision 0007 的来源附件中。
+
+| 来源（SuperScalarModel 仓库相对路径） | 本文采用的内容 | 边界 |
+|---|---|---|
+| `archSpec/cube/CUBE_Architecture_Spec_v3.2.md` | CUBE quarter 组织、参考低精度吞吐 | 参考 1:2:8 与 WSE 目标 1:4:8 有区别 |
+| `docs/model/ndf/l1/core/top/dav-core-top-0007.md` | 七个 H1 与组合边界 | 职责不等于固定物理副本数 |
+| `archSpec/superscalar_arch_as.md` | PE、Tile 存储、异构执行与数据通路的设计动机 | 历史组织与数值不覆盖当前 NDF |
+| `docs/model/ndf/l0/dav-adr-017.md` | SPE 子域及 ROB/BROB 职责 | 源合同标为 draft |
+| `docs/model/ndf/l0/dav-adr-007.md` | Local Tile hand、大小、代际与绑定 | 当前模型范围不等于所有 ISA 实现上限 |
+| `docs/model/ndf/l1/core/top/dav-core-top-0001.md` | 完成、发布与顺序提交分离 | 源合同标为 draft |
+| `docs/model/ndf/l1/mem/tlsu/dav-mem-tlsu-0004.md` | 数据交付、发布、提交和可见性分离 | router 扩展遵循职责边界，不自动获得现成实现 |
+| `docs/model/ndf/l1/mem/top/dav-mem-top-0001.md` | MEM/TLSU、字节覆盖与恢复 | 统一 GM/多核一致性需 WSE 另定 profile |
+| `docs/model/ndf/l1/cube/top/dav-cube-top-0004.md` | Shared TMATMUL 的核内协作 | 不能当作跨核 Calendar |
+| `isa/ISACommon/OpcodeManager.h`、`TileOpManager.cpp` | 已登记的 Block/Tile 指令名称 | 不证明新增 Calendar 编码存在 |
+
+本版优先规定 WSE 设计方向和待闭合接口。《WSE Calendar 方案》仍保留原文，
+其路由编码和守恒规则继续作为参考；旧 CCE/MTE/PIPE 绑定不再作为本版核接口。
+本仓库 Python/ACIR 模型尚未据此迁移，旧测试、旧性能口径及旧源版本描述需在后续
+模型变更中逐项对齐。本次未运行仿真，也不声明新核性能或完整程序执行已经验证。

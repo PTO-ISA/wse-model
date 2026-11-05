@@ -5,6 +5,11 @@ route bitmap becomes a completed collective, and which layering rules the code i
 required to obey. It describes what exists in `src/wse_model/` today; the
 [roadmap](../roadmap.md) states what does not.
 
+The [v0.2 whitepaper](../design/wse-system-architecture-whitepaper.md) defines a
+new SuperscalarNPU target with TLSU/Shared-memory router interfaces. This page
+continues to describe the existing implementation, which has not yet migrated;
+see [decision 0007](../decisions/0007-superscalarnpu-whitepaper.md).
+
 ## Module map
 
 ### Top-level modules
