@@ -8,8 +8,8 @@ place so that drift is caught by CI rather than by a reviewer:
 * the version in ``pyproject.toml`` equals ``wse_model.__version__``;
 * the required status checks in ``.github/repository-governance.json`` name the
   jobs that ``.github/workflows/ci.yml`` actually defines, and vice versa;
-* the design-source digest manifest covers ``docs/design/``;
-* ``docs/design/`` is untouched by referencing only through the manifest;
+* the design-source digest manifest covers the frozen sources in ``docs/design/``;
+* maintained roadmaps are explicitly distinguished from those frozen sources;
 * ``CHANGELOG.md`` has an ``Unreleased`` section;
 * no tracked source file contains an AI co-author trailer.
 
@@ -55,7 +55,12 @@ REQUIRED_FILES = (
     "docs/design/MANIFEST.json",
     "docs/design/wse-system-architecture-whitepaper.md",
     "docs/design/wse-calendar-scheme.md",
+    "docs/design/wse-esl-deepseek-v4-pro-roadmap.md",
 )
+
+#: Maintained plans are not verbatim design inputs; all other design pages must
+#: remain covered by the source manifest.
+MAINTAINED_DESIGN_DOCS = {"wse-esl-deepseek-v4-pro-roadmap.md"}
 
 #: Trailer patterns that must never appear in commits or repository text.
 FORBIDDEN_TRAILERS = (
@@ -182,7 +187,7 @@ def check_design_manifest(violations: list[str]) -> None:
         return
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     sources = manifest.get("sources", {})
-    on_disk = {path.name for path in design_dir.glob("*.md")}
+    on_disk = {path.name for path in design_dir.glob("*.md")} - MAINTAINED_DESIGN_DOCS
     if set(sources) != on_disk:
         _fail(
             violations,
