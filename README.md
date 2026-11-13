@@ -11,18 +11,20 @@
   <a href="docs/architecture/overview.md"><img src="https://img.shields.io/badge/model-architecture-blue" alt="Architecture model"></a>
 </p>
 
-WSE is a **bandwidth-for-latency** accelerator: each AICORE owns a private
-384 MiB local SRAM with a 1 TB/s target instead of sharing a global HBM,
+WSE is a **bandwidth-for-latency** accelerator: the four dies have a nominal total of 22 GB of SRAM.
+Manufacturing yield reduces the usable SRAM capacity slightly. The cores can also access HBM around the chip. A core’s HBM access has no fixed completion latency.
+Each Superscalar Core has roughly 100 MB of local SRAM with a 1 TB/s bandwidth target,
 targeting the weight-transfer cost of decode-stage operators (MoE FFN and
 attention Q/K/V/O projection). Actual compute/memory balance depends on shape
-and effective throughput. With no global memory there is also no shared-memory
-path between cores, so every split tensor must be reassembled by explicit
-collective communication over the NoC — orchestrated by **Calendar**, which
-moves both path and timeslot decisions into compile time.
+and effective throughput. The WSE hardware design supports two cross-core access models. Partitioned Global Address Space
+(PGAS) permits unordered random reads and writes to remote partitions. For
+ordered, deterministic collectives such as AllGather, Calendar schedules the
+routes and transmission slots ahead of execution. Collective traffic has strict priority
+where both classes contend. PGAS uses the remaining bandwidth.
 
 This repository is the executable model of that system.
 
-The [v0.2 system whitepaper](docs/design/wse-system-architecture-whitepaper.md)
+The [v0.3 system whitepaper](docs/design/wse-system-architecture-whitepaper.md)
 specifies SuperscalarNPU cores, local SRAM, and the proposed TLSU/Shared-memory router
 interfaces. The executable model below still follows the earlier baseline;
 [decision 0007](docs/decisions/0007-superscalarnpu-whitepaper.md) records that
