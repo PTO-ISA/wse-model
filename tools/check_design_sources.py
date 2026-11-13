@@ -28,8 +28,8 @@ MANIFEST = DESIGN_DIR / "MANIFEST.json"
 EXPECTED = {
     "wse-system-architecture-whitepaper.md": {
         "title": "WSE 系统架构设计白皮书",
-        "version": "v0.2",
-        "date": "2026-11-05",
+        "version": "v0.3",
+        "date": "2026-11-13",
     },
     "wse-calendar-scheme.md": {
         "title": "WSE Calendar 方案",
